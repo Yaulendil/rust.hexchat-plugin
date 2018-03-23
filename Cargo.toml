@@ -1,0 +1,7 @@
+[package]
+name = "hexchat-plugin"
+version = "0.1.0"
+authors = ["SoniEx2 <endermoneymod@gmail.com>"]
+
+[dependencies]
+libc = "0.2"
