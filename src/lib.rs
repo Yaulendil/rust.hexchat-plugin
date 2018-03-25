@@ -17,6 +17,62 @@
  */
 //! <!-- TODO (placeholder) -->
 
+/*
+ * Some info about how HexChat does things:
+ *
+ * All strings passed across the C API are UTF-8.
+ * - Except `hexchat_get_info(ph, "libdirfs")`, so we need to be careful with that one.
+ *
+ * The pointers `name: *mut *const char, desc: *mut *const char, vers: *mut *const char` point to
+ * inside the ph - that is, they're aliased. Thus, we must never convert a ph to an & or &mut
+ * except as part of retrieving or setting values in it (e.g. `(*ph).hexchat_get_info` or
+ * `(*ph).userdata = value`).
+ *
+ * `hexchat_plugin_get_info` is never used, so we omit it. It would be impractical not to.
+ *
+ * These cause UB:
+ * `hexchat_command` may invalidate the plugin context.
+ * `hexchat_find_context` and `hexchat_nickcmp` use the plugin context without checking it.
+ * `hexchat_get_prefs` uses the plugin context if name == "state_cursor" or "id" (or anything with
+ * the same hash).
+ * `hexchat_list_get` uses the plugin context if name == "notify" (or anything with the same hash).
+ * `hexchat_list_str`, `hexchat_list_int`, 
+ * `hexchat_emit_print`, `hexchat_emit_print_attrs` use the plugin context.
+ * `hexchat_send_modes` uses the plugin context.
+ * We need to wrap them (or, alternatively, hexchat_command). However, there's no (safe) way to get
+ * a valid context afterwards.
+ * - Actually that's a lie. Hexchat does a trick to give you a context as part of the channel list.
+ *     We can use that to our advantage. I'm not sure if it's better to wrap hexchat_command or the
+ *     other functions, tho.
+ *     (Do we want to walk a linked list every time we use hexchat_command? I'd think
+ *     hexchat_command is the most used API function... Plus, emit_print could indirectly
+ *     invalidate the context as well.)
+ *
+ * `hexchat_send_modes` should only be used with channels; however, it doesn't cause UB - it just
+ * doesn't work.
+ *
+ * `hexchat_pluginpref_get_int`, `hexchat_pluginpref_get_str`, `hexchat_pluginpref_set_int`,
+ * `hexchat_pluginpref_set_str` cannot be used while `name`, `desc`, `vers` are null.
+ *
+ * `hexchat_plugin_init` receives an arg string. it may be null. this isn't documented anywhere.
+ */
+
+/*
+ * Some info about how we do things:
+ *
+ * DO NOT CALL printf/commandf/etc FAMILY OF FUNCTIONS. You can't avoid allocations, so just
+ * allocate some CStrings on the Rust side. It has the exact same effect, since those functions
+ * allocate internally anyway.
+ */
+
+/*
+ * Big list o' TODO:
+ * -[ ] Finish basic API support. [PRI-HIGH]
+ * -[ ] Wrap contexts within something we keep track of. Mark them invalid when contexts are
+ *     closed. [PRI-MAYBE]
+ * -[ ] ???
+ */
+
 #[doc(hidden)]
 pub extern crate libc;
 
@@ -26,37 +82,517 @@ use std::panic::catch_unwind;
 use std::thread;
 use std::ffi::{CString, CStr};
 use std::str::FromStr;
+use std::mem;
+use std::ptr;
+use std::marker::PhantomData;
+use std::ops;
 
-const EMPTY_CSTRING_DATA: &[u8] = b"\0";
+// ****** //
+// PUBLIC //
+// ****** //
 
 /// A hexchat plugin
 pub trait Plugin {
-    fn init(&mut self, &mut PluginHandle) -> bool;
+    /// Called to initialize the plugin.
+    fn init(&self, ph: &mut PluginHandle, arg: Option<&str>) -> bool;
+
+    /// Called to deinitialize the plugin.
+    ///
+    /// This is always called immediately prior to Drop::drop.
+    fn deinit(&self, _ph: &mut PluginHandle) {
+    }
 }
 
-/// A handle for a hexchat plugin
+/// A hexchat plugin handle
 pub struct PluginHandle {
     ph: *mut internals::Ph,
-    filename: Option<CString>,
-    registered: bool,
-    fakehandle: *const internals::PluginGuiHandle,
+    // Used for registration
+    info: PluginInfo,
 }
 
-impl PluginHandle {
-    pub fn register(&mut self, name: &str, desc: &str, ver: &str) {
+pub struct Word<'a> {
+    word: Vec<&'a str>
+}
+
+pub struct WordEol<'a> {
+    word_eol: Vec<&'a str>
+}
+
+/// A safety wrapper that ensures you're working with a valid context.
+pub struct EnsureValidContext<'a> {
+    ph: &'a mut PluginHandle,
+}
+
+/// An status indicator for event callbacks. Indicates whether to continue processing, eat hexchat,
+/// eat plugin, or eat all.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Eat {
+    do_eat: i32,
+}
+
+/// Equivalent to HEXCHAT_EAT_NONE.
+pub const EAT_NONE: Eat = Eat { do_eat: 0 };
+/// Equivalent to HEXCHAT_EAT_HEXCHAT.
+pub const EAT_HEXCHAT: Eat = Eat { do_eat: 1 };
+/// Equivalent to HEXCHAT_EAT_PLUGIN.
+pub const EAT_PLUGIN: Eat = Eat { do_eat: 2 };
+/// Equivalent to HEXCHAT_EAT_ALL.
+pub const EAT_ALL: Eat = Eat { do_eat: 1 | 2 };
+
+/// A command hook handle, created with PluginHandle::hook_command.
+pub struct CommandHookHandle {
+    ph: *mut internals::Ph,
+    hh: *const internals::HexchatHook,
+    // this does actually store an Box<...>, but on the other side of the FFI.
+    _f: PhantomData<Box<CommandHookUd>>,
+}
+
+/// A context.
+// We don't want this Copy + Clone, as we may want to implement a context invalidation system
+// at some point (rather than relying on the hexchat allocator not to allocate a new context where
+// a context was free'd).
+pub struct Context {
+    ctx: *const internals::HexchatContext,
+}
+
+// #[derive(Debug)] // doesn't work
+pub struct InvalidContextError<F: FnOnce(EnsureValidContext) -> R, R>(F);
+
+impl<F: FnOnce(EnsureValidContext) -> R, R> InvalidContextError<F, R> {
+    pub fn get_closure(self) -> F {
+        self.0
+    }
+}
+
+impl Drop for CommandHookHandle {
+    fn drop(&mut self) {
         unsafe {
-            let ph = &mut *self.ph;
-            if let Some(hexchat_plugingui_add) = ph.hexchat_plugingui_add {
-                let filename = self.filename.take().expect("Attempt to re-register a plugin");
-                let name = CString::new(name).unwrap();
-                let desc = CString::new(desc).unwrap();
-                let ver = CString::new(ver).unwrap();
-                self.fakehandle = hexchat_plugingui_add(self.ph, filename.as_ptr(), name.as_ptr(), desc.as_ptr(), ver.as_ptr(), ::std::ptr::null_mut());
-            }
-            self.registered = true;
+            let b = ((*self.ph).hexchat_unhook)(self.ph, self.hh) as *mut CommandHookUd;
+            // we assume b is not null. this should be safe.
+            // just drop it
+            mem::drop(Box::from_raw(b));
         }
     }
 }
+
+impl<'a> Word<'a> {
+    unsafe fn new(word: *const *const libc::c_char) -> Word<'a> {
+        let mut vec = vec![];
+        for i in 1..32 {
+            let w = *word.offset(i);
+            if !w.is_null() {
+                vec.push(CStr::from_ptr(w).to_str().expect("non-utf8 word - broken hexchat"))
+            } else {
+                break
+            }
+        }
+        Word { word: vec }
+    }
+}
+
+impl<'a> ops::Deref for Word<'a> {
+    type Target = [&'a str];
+    fn deref(&self) -> &[&'a str] {
+        &self.word
+    }
+}
+
+impl<'a> WordEol<'a> {
+    unsafe fn new(word_eol: *const *const libc::c_char) -> WordEol<'a> {
+        let mut vec = vec![];
+        for i in 1..32 {
+            let w = *word_eol.offset(i);
+            if !w.is_null() {
+                vec.push(CStr::from_ptr(w).to_str().expect("non-utf8 word_eol - broken hexchat"))
+            } else {
+                break
+            }
+        }
+        WordEol { word_eol: vec }
+    }
+}
+
+impl<'a> ops::Deref for WordEol<'a> {
+    type Target = [&'a str];
+    fn deref(&self) -> &[&'a str] {
+        &self.word_eol
+    }
+}
+
+impl PluginHandle {
+    fn new(ph: *mut internals::Ph, info: PluginInfo) -> PluginHandle {
+        PluginHandle {
+            ph, info
+        }
+    }
+
+    /// Registers a hexchat plugin.
+    pub fn register(&mut self, name: &str, desc: &str, ver: &str) {
+        unsafe {
+            let info = self.info;
+            if !(*info.name).is_null() || !(*info.desc).is_null() || !(*info.vers).is_null() {
+                panic!("Attempt to re-register a plugin");
+            }
+            let name = CString::new(name).unwrap();
+            let desc = CString::new(desc).unwrap();
+            let ver = CString::new(ver).unwrap();
+            // these shouldn't panic. if they do, we'll need to free them afterwards.
+            (*info.name) = name.into_raw();
+            (*info.desc) = desc.into_raw();
+            (*info.vers) = ver.into_raw();
+        }
+    }
+
+    /// Ensures the current context is valid.
+    ///
+    /// # Panics
+    ///
+    /// This function may panic if it's called while hexchat is closing.
+    // NOTE: using a closure is nicer.
+    // TODO check if this is actually safe
+    pub fn ensure_valid_context<F, R>(&mut self, f: F) -> R where F: FnOnce(EnsureValidContext) -> R {
+        // let ctx = self.get_context();
+        // if !self.set_context(ctx) {
+        //     // invalid context
+        //     // TODO fix up the context
+        //     unimplemented!()
+        // }
+        // f(EnsureValidContext { ph: self })
+        let ctx = self.get_context();
+        // need this here because we don't have NLL yet
+        let res = self.with_context(&ctx, f);
+        match res {
+            Result::Ok(r @ _) => r,
+            Result::Err(e @ _) => {
+                let nctx = self.find_valid_context().expect("ensure_valid_context failed (find_valid_context failed), was hexchat closing?");
+                self.with_context(&nctx, e.get_closure()).ok().expect("ensure_valid_context failed, was hexchat closing?")
+            }
+        }
+    }
+
+    /// Returns the current context.
+    ///
+    /// Note: The returned context may be invalid. Use [`set_context`] to check.
+    ///
+    /// [`set_context`]: #method.set_context
+    pub fn get_context(&mut self) -> Context {
+        unsafe {
+            Context { ctx: ((*self.ph).hexchat_get_context)(self.ph) }
+        }
+    }
+
+    /// Sets the current context.
+    ///
+    /// Returns `true` if the context is valid, `false` otherwise.
+    pub fn set_context(&mut self, ctx: &Context) -> bool {
+        unsafe {
+            ((*self.ph).hexchat_set_context)(self.ph, ctx.ctx) != 0
+        }
+    }
+
+    /// Do something in a valid context.
+    ///
+    /// Note that this changes the active context and doesn't change it back.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(InvalidContextError(f))` if the context is invalid. See [`set_context`]. Otherwise,
+    /// calls `f` and returns `Ok(its result)`.
+    ///
+    /// Note that `InvalidContextError` contains the original closure. This allows you to retry.
+    ///
+    /// [`set_context`]: #method.set_context
+    // this is probably safe to inline, and actually a good idea for ensure_valid_context
+    #[inline]
+    pub fn with_context<F, R>(&mut self, ctx: &Context, f: F) -> Result<R, InvalidContextError<F, R>> where F: FnOnce(EnsureValidContext) -> R {
+        if !self.set_context(ctx) {
+            Err(InvalidContextError(f))
+        } else {
+            Ok(f(EnsureValidContext { ph: self }))
+        }
+    }
+
+    /// Sets a command hook
+    pub fn hook_command<F>(&mut self, cmd: &str, cb: F, pri: i32, help: Option<&str>) -> CommandHookHandle where F: Fn(&mut PluginHandle, Word, WordEol) -> Eat + 'static + ::std::panic::RefUnwindSafe {
+        unsafe extern "C" fn callback(word: *const *const libc::c_char, word_eol: *const *const libc::c_char, ud: *mut libc::c_void) -> libc::c_int {
+            let f: *const CommandHookUd = ud as *const CommandHookUd;
+            match catch_unwind(|| {
+                let word = Word::new(word);
+                let word_eol = WordEol::new(word_eol);
+                ((*f).0)(&mut PluginHandle::new((*f).1, (*f).2), word, word_eol).do_eat as libc::c_int
+            }) {
+                Result::Ok(v @ _) => v,
+                Result::Err(e @ _) => {
+                    let ph = (*f).1;
+                    // if it's a &str or String, just print it
+                    if let Some(estr) = e.downcast_ref::<&str>() {
+                        hexchat_print_str(ph, estr, false);
+                    } else if let Some(estring) = e.downcast_ref::<String>() {
+                        hexchat_print_str(ph, &estring, false);
+                    }
+                    0 // EAT_NONE
+                }
+            }
+        }
+        let b: Box<CommandHookUd> = Box::new((Box::new(cb), self.ph, self.info));
+        let name = CString::new(cmd).unwrap();
+        let help_text = help.map(CString::new).map(Result::unwrap);
+        let bp = Box::into_raw(b);
+        unsafe {
+            let res = ((*self.ph).hexchat_hook_command)(self.ph, name.as_ptr(), pri as libc::c_int, callback, help_text.as_ref().map(|s| s.as_ptr()).unwrap_or(ptr::null()), bp as *mut _);
+            assert!(!res.is_null());
+            CommandHookHandle { ph: self.ph, hh: res, _f: PhantomData }
+        }
+    }
+
+    /// Prints to the hexchat buffer.
+    // this checks the context internally. if it didn't, it wouldn't be safe to have here.
+    pub fn print(&mut self, s: &str) {
+        unsafe {
+            hexchat_print_str(self.ph, s, true);
+        }
+    }
+
+    // ******* //
+    // PRIVATE //
+    // ******* //
+
+    fn find_valid_context(&mut self) -> Option<Context> {
+        unsafe {
+            let ph = self.ph;
+            // TODO wrap this in a safer API, with proper Drop
+            #[allow(unused_mut)]
+            let mut list = ((*ph).hexchat_list_get)(ph, cstr(b"channels\0"));
+            // hexchat does this thing where it puts a context in a list_str.
+            // this is the proper way to do this
+            if ((*ph).hexchat_list_next)(ph, list) != 0 {
+                // if this panics we may leak some memory. it's not a big deal tho, as it indicates
+                // a bug in hexchat-plugin.rs.
+                let ctx = ((*ph).hexchat_list_str)(ph, list, cstr(b"context\0")) as *const internals::HexchatContext;
+                ((*ph).hexchat_list_free)(ph, list);
+                Some(Context { ctx })
+            } else {
+                ((*ph).hexchat_list_free)(ph, list);
+                None
+            }
+        }
+    }
+}
+
+impl<'a> EnsureValidContext<'a> {
+/*
+ * These cause UB:
+ * `hexchat_command` may invalidate the plugin context.
+ * `hexchat_find_context` and `hexchat_nickcmp` use the plugin context without checking it.
+ * `hexchat_get_prefs` uses the plugin context if name == "state_cursor" or "id" (or anything with
+ * the same hash).
+ * `hexchat_list_get` uses the plugin context if name == "notify" (or anything with the same hash).
+ * `hexchat_list_str`, `hexchat_list_int`, 
+ * `hexchat_emit_print`, `hexchat_emit_print_attrs` use the plugin context.
+ * `hexchat_send_modes` uses the plugin context.
+ * We need to wrap them (or, alternatively, hexchat_command). However, there's no (safe) way to get
+ * a valid context afterwards.
+ * - Actually that's a lie. Hexchat does a trick to give you a context as part of the channel list.
+ *     We can use that to our advantage. I'm not sure if it's better to wrap hexchat_command or the
+ *     other functions, tho.
+ *     (Do we want to walk a linked list every time we use hexchat_command? I'd think
+ *     hexchat_command is the most used API function... Plus, emit_print could indirectly
+ *     invalidate the context as well.)
+ *
+ * For performance we put them behind an EnsureValidContext - things that don't invalidate the
+ * context take an `&mut self`, things that do take an `self`.
+ */
+
+    pub fn find_context(&mut self, servname: Option<&str>, channel: Option<&str>) -> Option<Context> {
+        // TODO
+        unimplemented!()
+    }
+
+    pub fn nickcmp(&mut self, nick1: &str, nick2: &str) -> ::std::cmp::Ordering {
+        // TODO
+        unimplemented!()
+    }
+
+    pub fn send_modes(&mut self) {
+        // TODO
+        unimplemented!()
+    }
+
+    pub fn emit_print(self) {
+        // TODO
+        unimplemented!()
+    }
+
+    pub fn emit_print_attrs(self) {
+        // TODO
+        unimplemented!()
+    }
+
+    // ******** //
+    // FORWARDS //
+    // ******** //
+
+    pub fn get_context(&mut self) -> Context {
+        self.ph.get_context()
+    }
+
+    /// Sets the current context.
+    ///
+    /// Returns `true` if the context is valid, `false` otherwise.
+    pub fn set_context(&mut self, ctx: &Context) -> bool {
+        self.ph.set_context(ctx)
+    }
+
+    /// Prints to the hexchat buffer.
+    // TODO check if this triggers event hooks (which could call /close and invalidate the
+    // context).
+    pub fn print(&mut self, s: &str) {
+        self.ph.print(s)
+    }
+}
+
+// ******* //
+// PRIVATE //
+// ******* //
+
+// Type aliases, used for safety type checking.
+/// Userdata type used by a command hook.
+// We actually do want RefUnwindSafe. This function may be called multiple times, and it's not
+// automatically invalidated if it panics, so it may be called again after it panics. If you need
+// mutable state, std provides std::sync::Mutex which has poisoning. Other interior mutability with
+// poisoning could also be used. std doesn't have anything for single-threaded performance (yet),
+// but hexchat isn't particularly performance-critical.
+type CommandHookUd = (Box<Fn(&mut PluginHandle, Word, WordEol) -> Eat + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo);
+
+/// The contents of an empty CStr.
+///
+/// This is useful where you need a non-null CStr.
+// NOTE: MUST BE b"\0"!
+const EMPTY_CSTRING_DATA: &[u8] = b"\0";
+
+/// Converts a nul-terminated const bstring to a C string.
+///
+/// # Panics
+///
+/// Panics if b contains embedded nuls.
+// TODO const fn, once that's possible
+fn cstr(b: &'static [u8]) -> *const libc::c_char {
+    CStr::from_bytes_with_nul(b).unwrap().as_ptr()
+}
+
+/// Prints an &str to hexchat, trying to avoid allocations.
+///
+/// # Safety
+///
+/// This function does not check the passed in argument.
+///
+/// # Panics
+///
+/// Panics if panic_on_nul is true and the string contains embedded nuls.
+unsafe fn hexchat_print_str(ph: *mut internals::Ph, s: &str, panic_on_nul: bool) {
+    match CString::new(s) {
+        Result::Ok(cs @ _) => {
+            let csr: &CStr = &cs;
+            ((*ph).hexchat_print)(ph, csr.as_ptr())
+        },
+        e @ _ => if panic_on_nul {e.unwrap();}, // TODO nul_position?
+    }
+}
+
+/// Holds name, desc, vers
+// This is kinda naughty - we modify these values after returning from hexchat_plugin_init, during
+// the deinitialization.
+// However, if my reading of the HexChat code is correct, this is "ok".
+#[derive(Copy, Clone)]
+struct PluginInfo {
+    name: *mut *const libc::c_char,
+    desc: *mut *const libc::c_char,
+    vers: *mut *const libc::c_char,
+}
+
+impl PluginInfo {
+    /// Creates a PluginInfo.
+    ///
+    /// # Panics
+    ///
+    /// This function explicitly doesn't panic. Call unwrap() on the result instead.
+    fn new(name: *mut *const libc::c_char, desc: *mut *const libc::c_char, vers: *mut *const libc::c_char) -> Option<PluginInfo> {
+        if name.is_null() || desc.is_null() || vers.is_null() || name == desc || desc == vers || name == vers {
+            None
+        } else {
+            Some(unsafe { PluginInfo::new_unchecked(name, desc, vers) })
+        }
+    }
+
+    /// Creates a PluginInfo without checking the arguments.
+    ///
+    /// # Safety
+    ///
+    /// This function is unsafe, as it doesn't check the validity of the arguments. You're expected
+    /// to only pass in non-aliased non-null pointers. Use new if unsure.
+    unsafe fn new_unchecked(name: *mut *const libc::c_char, desc: *mut *const libc::c_char, vers: *mut *const libc::c_char) -> PluginInfo {
+        PluginInfo {
+            name, desc, vers
+        }
+    }
+
+    /// Drop relevant CStrings.
+    ///
+    /// # Safety
+    ///
+    /// This function is unsafe because calling it may trigger Undefined Behaviour. See also
+    /// [CString::from_raw].
+    ///
+    /// [from_raw]: https://doc.rust-lang.org/std/ffi/struct.CString.html#method.from_raw
+    unsafe fn drop_info(&mut self) {
+        if !(*self.name).is_null() {
+            mem::drop(CString::from_raw(*self.name as *mut _));
+            *self.name = cstr(EMPTY_CSTRING_DATA);
+        }
+        if !(*self.desc).is_null() {
+            mem::drop(CString::from_raw(*self.desc as *mut _));
+            *self.desc = cstr(EMPTY_CSTRING_DATA);
+        }
+        if !(*self.vers).is_null() {
+            mem::drop(CString::from_raw(*self.vers as *mut _));
+            *self.vers = cstr(EMPTY_CSTRING_DATA);
+        }
+    }
+}
+
+/// Plugin data stored in the hexchat plugin_handle.
+struct PhUserdata {
+    plug: Box<Plugin>,
+    pluginfo: PluginInfo,
+}
+
+/// Puts the userdata in the plugin handle.
+///
+/// # Safety
+///
+/// This function is unsafe because it doesn't check if the pointer is valid.
+///
+/// Improper use of this function can leak memory.
+unsafe fn put_userdata(ph: *mut internals::Ph, ud: Box<PhUserdata>) {
+    (*ph).userdata = Box::into_raw(ud) as *mut libc::c_void;
+}
+
+// unsafe fn get_userdata(ph: *mut internals::Ph) -> *const PhUserdata {
+//     (*ph).userdata as *const _
+// }
+
+/// Pops the userdata from the plugin handle.
+///
+/// # Safety
+///
+/// This function is unsafe because it doesn't check if the pointer is valid.
+unsafe fn pop_userdata(ph: *mut internals::Ph) -> Box<PhUserdata> {
+    Box::from_raw(mem::replace(&mut (*ph).userdata, ptr::null_mut()) as *mut PhUserdata)
+}
+
+// *********************** //
+// PUBLIC OUT OF NECESSITY //
+// *********************** //
 
 #[doc(hidden)]
 pub unsafe fn hexchat_plugin_init<T>(plugin_handle: *mut libc::c_void,
@@ -64,114 +600,129 @@ pub unsafe fn hexchat_plugin_init<T>(plugin_handle: *mut libc::c_void,
                                      plugin_desc: *mut *const libc::c_char,
                                      plugin_version: *mut *const libc::c_char,
                                      arg: *const libc::c_char) -> libc::c_int
-                                     where T: Plugin + Default {
-    if plugin_handle.is_null() {
+                                     where T: Plugin + Default + 'static {
+    if plugin_handle.is_null() || plugin_name.is_null() || plugin_desc.is_null() || plugin_version.is_null() {
         // we can't really do anything here.
-        eprintln!("hexchat_plugin_init called with a null plugin_handle. This is an error!");
+        eprintln!("hexchat_plugin_init called with a null pointer that shouldn't be null - broken hexchat");
         // TODO maybe call abort.
         return 0;
     }
-    let ph = &mut *(plugin_handle as *mut internals::Ph);
+    let ph = plugin_handle as *mut internals::Ph;
     // clear the "userdata" field first thing - if the deinit function gets called (wrong hexchat
     // version, other issues), we don't wanna try to drop the hexchat_dummy or hexchat_read_fd
     // function as if it were a Box!
-    ph.userdata = ::std::ptr::null_mut();
-    // we set these to empty strings because rust strings aren't nul-terminated. which means we
-    // need to *allocate* nul-terminated strings for the real values, and hexchat has no way of
-    // freeing these.
-    // BUT before we set them, read the filename off plugin_name - we'll need it!
-    // (TODO figure out how to make this NOT break the plugins list)
-    let filename = CStr::from_ptr(*plugin_name).to_owned();
-    let empty_cstr = CStr::from_bytes_with_nul_unchecked(EMPTY_CSTRING_DATA).as_ptr();
-    *plugin_name = empty_cstr;
-    *plugin_desc = empty_cstr;
-    *plugin_version = empty_cstr;
+    (*ph).userdata = ptr::null_mut();
+    // read the filename so we can pass it on later.
+    let filename = if !(*plugin_name).is_null() {
+        if let Ok(fname) = CStr::from_ptr(*plugin_name).to_owned().into_string() {
+            fname
+        } else {
+            eprintln!("failed to convert filename to utf8 - broken hexchat");
+            return 0;
+        }
+    } else {
+        // no filename specified for some reason, but we can still load
+        String::new() // empty string
+    };
+    // these may be null, unless initialization is successful.
+    // we set them to null as markers.
+    *plugin_name = ptr::null();
+    *plugin_desc = ptr::null();
+    *plugin_version = ptr::null();
     // do some version checks for safety
-    if let Some(hexchat_get_info) = ph.hexchat_get_info {
-        let ver: *const libc::c_char = hexchat_get_info(ph, CStr::from_bytes_with_nul_unchecked(b"version\0").as_ptr());
+    // NOTE: calling hexchat functions with null plugin_name, plugin_desc, plugin_version is a bit
+    // dangerous. this particular case is "ok".
+    {
+        let ver = ((*ph).hexchat_get_info)(ph, cstr(b"version\0")); // this shouldn't panic
         let cstr = CStr::from_ptr(ver);
         if let Ok(ver) = cstr.to_str() {
             let mut iter = ver.split('.');
-            let a = iter.next().map(i32::from_str).and_then(Result::ok);
-            let b = iter.next().map(i32::from_str).and_then(Result::ok);
-            let c = iter.next().map(i32::from_str).and_then(Result::ok);
-            if !match a.unwrap_or(0) {
-                0 | 1 => false,
-                2 => match b.unwrap_or(0) {
-                    // range patterns are a bit broken
-                    0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 => false,
-                    9 => match c.unwrap_or(0) {
-                        0 | 1 | 2 | 3 | 4 | 5 => false,
-                        6 => 
-                            // min acceptable version = 2.9.6
-                            true,
-                        _ => true,
-                    },
-                    _ => true,
-                },
-                _ => true,
-            } {
-                // TODO print: "error loading plugin: hexchat too old"?
+            let a = iter.next().map(i32::from_str).and_then(Result::ok).unwrap_or(0);
+            let b = iter.next().map(i32::from_str).and_then(Result::ok).unwrap_or(0);
+            let c = iter.next().map(i32::from_str).and_then(Result::ok).unwrap_or(0);
+            // 2.9.6 or greater
+            if !(a > 2 || (a == 2 && (b > 9 || (b == 9 && (c > 6 || (c == 6)))))) {
                 return 0;
             }
         } else {
             return 0;
         }
     }
-    let r: thread::Result<Option<Box<_>>> = catch_unwind(|| {
-        let mut plug = T::default();
-        let mut pluginhandle = PluginHandle {
-            ph: plugin_handle as *mut _,
-            registered: false,
-            filename: Some(filename),
-            fakehandle: ::std::ptr::null(),
-        };
-        if plug.init(&mut pluginhandle) {
-            if pluginhandle.registered {
-                Some(Box::new((plug, pluginhandle.fakehandle)))
+    let mut pluginfo = if let Some(pluginfo) = PluginInfo::new(plugin_name, plugin_desc, plugin_version) {
+        pluginfo
+    } else {
+        return 0;
+    };
+    let r: thread::Result<Option<Box<_>>> = {
+        catch_unwind(move || {
+            let mut pluginhandle = PluginHandle {
+                ph: ph,
+                info: pluginfo,
+            };
+            let plug = T::default();
+            if plug.init(&mut pluginhandle, if !arg.is_null() { Some(CStr::from_ptr(arg).to_str().expect("arg not valid utf-8 - broken hexchat")) } else { None }) {
+                if !(pluginfo.name.is_null() || pluginfo.desc.is_null() || pluginfo.vers.is_null()) {
+                    Some(Box::new(PhUserdata { plug: Box::new(plug), pluginfo }))
+                } else {
+                    // TODO log: forgot to call register
+                    None
+                }
             } else {
-                // TODO log: forgot to call register
                 None
             }
-        } else {
-            None
-        }
-    });
-    if r.is_ok() {
-        if let Ok(Some(plug)) = r {
-            ph.userdata = Box::into_raw(plug) as *mut libc::c_void;
-            1
-        } else {
+        })
+    };
+    match r {
+        Result::Ok(Option::Some(plug @ _)) => {
+            if (*plugin_name).is_null() || (*plugin_desc).is_null() || (*plugin_version).is_null() {
+                // TODO deallocate any which are non-null
+                pluginfo.drop_info();
+                0
+            } else {
+                put_userdata(ph, plug);
+                1
+            }
+        },
+        r @ _ => {
+            // if the initialization fails, deinit doesn't get called, so we need to clean up
+            // ourselves.
+            
+            if let Err(_) = r {
+                // TODO try to log panic?
+            }
             0
-        }
-    } else {
-        // TODO try to log panic?
-        0
+        },
     }
 }
 
 #[doc(hidden)]
 pub unsafe fn hexchat_plugin_deinit<T>(plugin_handle: *mut libc::c_void) where T: Plugin {
-    // plugin_handle should never be null, but just in case...
+    // plugin_handle should never be null, but just in case.
     if !plugin_handle.is_null() {
-        let ph = &mut *(plugin_handle as *mut internals::Ph);
-        if !ph.userdata.is_null() {
-            // 
-            let userdata = ph.userdata;
-            ph.userdata = ::std::ptr::null_mut();
-            // we use an explicit drop (instead of an implicit one) so this is less confusing/weird
-            // to read.
-            catch_unwind(|| {
-                let ph = &mut *(plugin_handle as *mut internals::Ph);
-                let (plug, fakehandle) = *Box::from_raw(userdata as *mut (T, *const internals::PluginGuiHandle));
-                if let Some(hexchat_plugingui_remove) = ph.hexchat_plugingui_remove {
-                    hexchat_plugingui_remove(ph, fakehandle);
+        let ph = plugin_handle as *mut internals::Ph;
+        // userdata should also never be null.
+        if !(*ph).userdata.is_null() {
+            {
+                let mut info: Option<PluginInfo> = None;
+                {
+                    let mut ausinfo = ::std::panic::AssertUnwindSafe(&mut info);
+                    catch_unwind(move || {
+                        let userdata = *pop_userdata(ph);
+                        **ausinfo = Some(userdata.pluginfo);
+                        userdata.plug.deinit(&mut PluginHandle { ph, info: userdata.pluginfo });
+                    }).ok();
                 }
-                ::std::mem::drop(plug); // suppress compiler warnings
-            }).ok();
+                if let Some(mut info) = info {
+                    info.drop_info();
+                } else {
+                    eprintln!("I have no idea tbh, I didn't know `pop_userdata` could panic!");
+                }
+            }
+        } else {
+            eprintln!("null userdata in hexchat_plugin_deinit - broken hexchat or broken hexchat-plugin.rs");
         }
     } else {
-        eprintln!("hexchat_plugin_deinit called with a null plugin_handle. This is an error!");
+        eprintln!("hexchat_plugin_deinit called with a null plugin_handle - broken hexchat");
     }
 }
 

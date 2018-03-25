@@ -1,7 +1,10 @@
 [package]
 name = "hexchat-plugin"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["SoniEx2 <endermoneymod@gmail.com>"]
+description = "Lets you write HexChat plugins in Rust"
+license = "AGPL-3.0+"
+repository = "https://bitbucket.org/SoniEx2/hexchat-plugin.rs"
 
 [dependencies]
 libc = "0.2"
