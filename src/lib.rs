@@ -95,7 +95,7 @@
  *     -[ ] hexchat_hook_server_attrs
  *     -[x] hexchat_hook_timer
  *     -[x] ~~hexchat_unhook~~ not available - use Drop impls
- *     -[ ] hexchat_find_context
+ *     -[x] hexchat_find_context
  *     -[x] hexchat_get_context
  *     -[x] hexchat_set_context
  *     -[ ] hexchat_pluginpref_set_str
@@ -631,9 +631,20 @@ impl<'a> EnsureValidContext<'a> {
  * context take an `&mut self`, things that do take an `self`.
  */
 
+    /// Finds an open context for the given servname and channel.
     pub fn find_context(&mut self, servname: Option<&str>, channel: Option<&str>) -> Option<Context> {
-        // TODO
-        unimplemented!()
+        // this was a mistake but oh well
+        let ph = self.ph.ph;
+        let servname = CString::new(servname).unwrap();
+        let channel = CString::new(channel).unwrap();
+        let ctx = unsafe {
+            ((*ph).hexchat_find_context)(ph, servname.as_ptr(), channel.as_ptr())
+        };
+        if ctx.is_null() {
+            None
+        } else {
+            Some(Context { ctx })
+        }
     }
 
     pub fn nickcmp(&mut self, nick1: &str, nick2: &str) -> ::std::cmp::Ordering {
