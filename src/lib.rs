@@ -649,9 +649,24 @@ impl<'a> EnsureValidContext<'a> {
         }
     }
 
+    /// Compares two nicks based on the server's case mapping.
     pub fn nickcmp(&mut self, nick1: &str, nick2: &str) -> ::std::cmp::Ordering {
-        // TODO
-        unimplemented!()
+        use std::cmp::Ordering;
+        // this was a mistake but oh well
+        let ph = self.ph.ph;
+        // need to put this in a more permanent position than temporaries
+        let nick1 = CString::new(nick1).unwrap();
+        let nick2 = CString::new(nick2).unwrap();
+        let res = unsafe {
+            ((*ph).hexchat_nickcmp)(ph, nick1.as_ptr(), nick2.as_ptr())
+        };
+        if res < 0 {
+            Ordering::Less
+        } else if res > 0 {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        }
     }
 
     pub fn send_modes(&mut self) {
