@@ -663,8 +663,10 @@ impl<'a> EnsureValidContext<'a> {
     pub fn command(self, cmd: &str) {
         // this was a mistake but oh well
         let ph = self.ph.ph;
+        // need to put this in a more permanent position than temporaries
+        let cmd = CString::new(cmd).unwrap();
         unsafe {
-            ((*ph).hexchat_command)(ph, CString::new(cmd).unwrap().as_ptr())
+            ((*ph).hexchat_command)(ph, cmd.as_ptr())
         }
     }
 
