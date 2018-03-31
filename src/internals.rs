@@ -66,18 +66,18 @@ pub struct Ph {
             name: *const libc::c_char,
             pri: libc::c_int,
             /* CALLBACK */
-            callback: Option<unsafe extern "C" fn(word: *const *const libc::c_char, word_eol: *const *const libc::c_char, user_data: *mut libc::c_void) -> libc::c_int>,
+            callback: unsafe extern "C" fn(word: *const *const libc::c_char, word_eol: *const *const libc::c_char, user_data: *mut libc::c_void) -> libc::c_int,
             userdata: *mut libc::c_void) -> *const HexchatHook,
     pub hexchat_hook_print: unsafe extern "C" fn(ph: *mut HexchatPlugin,
             name: *const libc::c_char,
             pri: libc::c_int,
             /* CALLBACK */
-            callback: Option<unsafe extern "C" fn(word: *const *const libc::c_char, user_data: *mut libc::c_void) -> libc::c_int>,
+            callback: unsafe extern "C" fn(word: *const *const libc::c_char, user_data: *mut libc::c_void) -> libc::c_int,
             userdata: *mut libc::c_void) -> *const HexchatHook,
     pub hexchat_hook_timer: unsafe extern "C" fn(ph: *mut HexchatPlugin,
             timeout: libc::c_int,
             /* CALLBACK */
-            callback: Option<unsafe extern "C" fn(user_data: *mut libc::c_void) -> libc::c_int>,
+            callback: unsafe extern "C" fn(user_data: *mut libc::c_void) -> libc::c_int,
             userdata: *mut libc::c_void) -> *const HexchatHook,
     pub hexchat_hook_fd: unsafe extern "C" fn(ph: *mut HexchatPlugin,
             fd: libc::c_int,

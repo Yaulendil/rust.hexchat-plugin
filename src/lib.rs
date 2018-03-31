@@ -67,9 +67,50 @@
 
 /*
  * Big list o' TODO:
- * -[ ] Finish basic API support. [PRI-HIGH]
+ * -[ ] Finish API support. [PRI-HIGH]
+ *     -[x] word
+ *     -[x] word_eol
+ *     -[ ] HEXCHAT_PRI_{HIGHEST, HIGH, NORM, LOW, LOWEST}
+ *     -[x] HEXCHAT_EAT_{NONE, HEXCHAT, PLUGIN, ALL}
+ *     -[ ] HEXCHAT_FD_{READ, WRITE, EXCEPTION, NOTSOCKET}
+ *     -[x] hexchat_command (for commandf, use command(&format!("...")), it is equivalent.)
+ *     -[x] hexchat_print (for printf, use print(&format!("...")), it is equivalent.)
+ *     -[ ] hexchat_emit_print
+ *     -[ ] hexchat_emit_print_attrs
+ *     -[ ] hexchat_send_modes
+ *     -[ ] hexchat_nickcmp
+ *     -[ ] hexchat_strip
+ *     -[x] ~~hexchat_free~~ not available - use Drop impls.
+ *     -[ ] hexchat_event_attrs_create
+ *     -[x] ~~hexchat_event_attrs_free~~ not available - use Drop impls.
+ *     -[ ] hexchat_get_info
+ *     -[ ] hexchat_get_prefs
+ *     -[ ] hexchat_list_get, hexchat_list_fields, hexchat_list_next, hexchat_list_str,
+ *         hexchat_list_int, hexchat_list_time, hexchat_list_free
+ *     -[x] hexchat_hook_command
+ *     -[ ] hexchat_hook_fd
+ *     -[x] hexchat_hook_print
+ *     -[ ] hexchat_hook_print_attrs
+ *     -[x] hexchat_hook_server
+ *     -[ ] hexchat_hook_server_attrs
+ *     -[x] hexchat_hook_timer
+ *     -[x] ~~hexchat_unhook~~ not available - use Drop impls
+ *     -[ ] hexchat_find_context
+ *     -[x] hexchat_get_context
+ *     -[x] hexchat_set_context
+ *     -[ ] hexchat_pluginpref_set_str
+ *     -[ ] hexchat_pluginpref_get_str
+ *     -[ ] hexchat_pluginpref_set_int
+ *     -[ ] hexchat_pluginpref_get_int
+ *     -[ ] hexchat_pluginpref_delete
+ *     -[ ] hexchat_pluginpref_list
+ *     -[ ] hexchat_plugingui_add
+ *     -[x] ~~hexchat_plugingui_remove~~ not available - use Drop impls.
  * -[ ] Wrap contexts within something we keep track of. Mark them invalid when contexts are
  *     closed. [PRI-MAYBE]
+ * -[x] Anchor closures on the stack using Rc<T>. Many (most?) hooks are reentrant. As far as I
+ *     know, all of them need this.
+ *     -[x] Additionally, use a Cell<bool> for timers.
  * -[ ] ???
  */
 
@@ -86,6 +127,8 @@ use std::mem;
 use std::ptr;
 use std::marker::PhantomData;
 use std::ops;
+use std::rc::Rc;
+use std::cell::Cell;
 
 // ****** //
 // PUBLIC //
@@ -139,12 +182,38 @@ pub const EAT_PLUGIN: Eat = Eat { do_eat: 2 };
 /// Equivalent to HEXCHAT_EAT_ALL.
 pub const EAT_ALL: Eat = Eat { do_eat: 1 | 2 };
 
-/// A command hook handle, created with PluginHandle::hook_command.
+/// A command hook handle.
 pub struct CommandHookHandle {
     ph: *mut internals::Ph,
     hh: *const internals::HexchatHook,
-    // this does actually store an Box<...>, but on the other side of the FFI.
-    _f: PhantomData<Box<CommandHookUd>>,
+    // this does actually store an Rc<...>, but on the other side of the FFI.
+    _f: PhantomData<Rc<CommandHookUd>>,
+}
+
+/// A server hook handle.
+pub struct ServerHookHandle {
+    ph: *mut internals::Ph,
+    hh: *const internals::HexchatHook,
+    // this does actually store an Rc<...>, but on the other side of the FFI.
+    _f: PhantomData<Rc<ServerHookUd>>,
+}
+
+/// A print hook handle.
+pub struct PrintHookHandle {
+    ph: *mut internals::Ph,
+    hh: *const internals::HexchatHook,
+    // this does actually store an Rc<...>, but on the other side of the FFI.
+    _f: PhantomData<Rc<PrintHookUd>>,
+}
+
+/// A timer hook handle.
+pub struct TimerHookHandle {
+    ph: *mut internals::Ph,
+    hh: *const internals::HexchatHook,
+    // avoids issues
+    alive: Rc<Cell<bool>>,
+    // this does actually store an Rc<...>, but on the other side of the FFI.
+    _f: PhantomData<Rc<TimerHookUd>>,
 }
 
 /// A context.
@@ -170,7 +239,42 @@ impl Drop for CommandHookHandle {
             let b = ((*self.ph).hexchat_unhook)(self.ph, self.hh) as *mut CommandHookUd;
             // we assume b is not null. this should be safe.
             // just drop it
-            mem::drop(Box::from_raw(b));
+            mem::drop(Rc::from_raw(b));
+        }
+    }
+}
+impl Drop for ServerHookHandle {
+    fn drop(&mut self) {
+        unsafe {
+            let b = ((*self.ph).hexchat_unhook)(self.ph, self.hh) as *mut ServerHookUd;
+            // we assume b is not null. this should be safe.
+            // just drop it
+            mem::drop(Rc::from_raw(b));
+        }
+    }
+}
+impl Drop for PrintHookHandle {
+    fn drop(&mut self) {
+        unsafe {
+            let b = ((*self.ph).hexchat_unhook)(self.ph, self.hh) as *mut PrintHookUd;
+            // we assume b is not null. this should be safe.
+            // just drop it
+            mem::drop(Rc::from_raw(b));
+        }
+    }
+}
+impl Drop for TimerHookHandle {
+    fn drop(&mut self) {
+        if !self.alive.get() {
+            // already free'd.
+            return;
+        }
+        self.alive.set(false);
+        unsafe {
+            let b = ((*self.ph).hexchat_unhook)(self.ph, self.hh) as *mut TimerHookUd;
+            // we assume b is not null. this should be safe.
+            // just drop it
+            mem::drop(Rc::from_raw(b));
         }
     }
 }
@@ -182,9 +286,10 @@ impl<'a> Word<'a> {
             let w = *word.offset(i);
             if !w.is_null() {
                 vec.push(CStr::from_ptr(w).to_str().expect("non-utf8 word - broken hexchat"))
-            } else {
-                break
             }
+        }
+        while let Some(&"") = vec.last() {
+            vec.pop();
         }
         Word { word: vec }
     }
@@ -204,9 +309,10 @@ impl<'a> WordEol<'a> {
             let w = *word_eol.offset(i);
             if !w.is_null() {
                 vec.push(CStr::from_ptr(w).to_str().expect("non-utf8 word_eol - broken hexchat"))
-            } else {
-                break
             }
+        }
+        while let Some(&"") = vec.last() {
+            vec.pop();
         }
         WordEol { word_eol: vec }
     }
@@ -315,15 +421,17 @@ impl PluginHandle {
     /// Sets a command hook
     pub fn hook_command<F>(&mut self, cmd: &str, cb: F, pri: i32, help: Option<&str>) -> CommandHookHandle where F: Fn(&mut PluginHandle, Word, WordEol) -> Eat + 'static + ::std::panic::RefUnwindSafe {
         unsafe extern "C" fn callback(word: *const *const libc::c_char, word_eol: *const *const libc::c_char, ud: *mut libc::c_void) -> libc::c_int {
-            let f: *const CommandHookUd = ud as *const CommandHookUd;
-            match catch_unwind(|| {
+            // hook may unhook itself.
+            // however, we don't wanna free it until it has returned.
+            let f: Rc<CommandHookUd> = rc_clone_from_raw(ud as *const CommandHookUd);
+            let ph = f.1;
+            match catch_unwind(move || {
                 let word = Word::new(word);
                 let word_eol = WordEol::new(word_eol);
-                ((*f).0)(&mut PluginHandle::new((*f).1, (*f).2), word, word_eol).do_eat as libc::c_int
+                (f.0)(&mut PluginHandle::new(f.1, f.2), word, word_eol).do_eat as libc::c_int
             }) {
                 Result::Ok(v @ _) => v,
                 Result::Err(e @ _) => {
-                    let ph = (*f).1;
                     // if it's a &str or String, just print it
                     if let Some(estr) = e.downcast_ref::<&str>() {
                         hexchat_print_str(ph, estr, false);
@@ -334,14 +442,134 @@ impl PluginHandle {
                 }
             }
         }
-        let b: Box<CommandHookUd> = Box::new((Box::new(cb), self.ph, self.info));
+        let b: Rc<CommandHookUd> = Rc::new((Box::new(cb), self.ph, self.info));
         let name = CString::new(cmd).unwrap();
         let help_text = help.map(CString::new).map(Result::unwrap);
-        let bp = Box::into_raw(b);
+        let bp = Rc::into_raw(b);
         unsafe {
             let res = ((*self.ph).hexchat_hook_command)(self.ph, name.as_ptr(), pri as libc::c_int, callback, help_text.as_ref().map(|s| s.as_ptr()).unwrap_or(ptr::null()), bp as *mut _);
             assert!(!res.is_null());
             CommandHookHandle { ph: self.ph, hh: res, _f: PhantomData }
+        }
+    }
+    /// Sets a server hook
+    pub fn hook_server<F>(&mut self, cmd: &str, cb: F, pri: i32) -> ServerHookHandle where F: Fn(&mut PluginHandle, Word, WordEol) -> Eat + 'static + ::std::panic::RefUnwindSafe {
+        unsafe extern "C" fn callback(word: *const *const libc::c_char, word_eol: *const *const libc::c_char, ud: *mut libc::c_void) -> libc::c_int {
+            // hook may unhook itself.
+            // however, we don't wanna free it until it has returned.
+            let f: Rc<ServerHookUd> = rc_clone_from_raw(ud as *const ServerHookUd);
+            let ph = f.1;
+            match catch_unwind(move || {
+                let word = Word::new(word);
+                let word_eol = WordEol::new(word_eol);
+                (f.0)(&mut PluginHandle::new(f.1, f.2), word, word_eol).do_eat as libc::c_int
+            }) {
+                Result::Ok(v @ _) => v,
+                Result::Err(e @ _) => {
+                    // if it's a &str or String, just print it
+                    if let Some(estr) = e.downcast_ref::<&str>() {
+                        hexchat_print_str(ph, estr, false);
+                    } else if let Some(estring) = e.downcast_ref::<String>() {
+                        hexchat_print_str(ph, &estring, false);
+                    }
+                    0 // EAT_NONE
+                }
+            }
+        }
+        let b: Rc<ServerHookUd> = Rc::new((Box::new(cb), self.ph, self.info));
+        let name = CString::new(cmd).unwrap();
+        let bp = Rc::into_raw(b);
+        unsafe {
+            let res = ((*self.ph).hexchat_hook_server)(self.ph, name.as_ptr(), pri as libc::c_int, callback, bp as *mut _);
+            assert!(!res.is_null());
+            ServerHookHandle { ph: self.ph, hh: res, _f: PhantomData }
+        }
+    }
+    /// Sets a print hook
+    pub fn hook_print<F>(&mut self, name: &str, cb: F, pri: i32) -> PrintHookHandle where F: Fn(&mut PluginHandle, Word) -> Eat + 'static + ::std::panic::RefUnwindSafe {
+        unsafe extern "C" fn callback(word: *const *const libc::c_char, ud: *mut libc::c_void) -> libc::c_int {
+            // hook may unhook itself.
+            // however, we don't wanna free it until it has returned.
+            let f: Rc<PrintHookUd> = rc_clone_from_raw(ud as *const PrintHookUd);
+            let ph = f.1;
+            match catch_unwind(move || {
+                let word = Word::new(word);
+                (f.0)(&mut PluginHandle::new(f.1, f.2), word).do_eat as libc::c_int
+            }) {
+                Result::Ok(v @ _) => v,
+                Result::Err(e @ _) => {
+                    // if it's a &str or String, just print it
+                    if let Some(estr) = e.downcast_ref::<&str>() {
+                        hexchat_print_str(ph, estr, false);
+                    } else if let Some(estring) = e.downcast_ref::<String>() {
+                        hexchat_print_str(ph, &estring, false);
+                    }
+                    0 // EAT_NONE
+                }
+            }
+        }
+        let b: Rc<PrintHookUd> = Rc::new((Box::new(cb), self.ph, self.info));
+        let name = CString::new(name).unwrap();
+        let bp = Rc::into_raw(b);
+        unsafe {
+            let res = ((*self.ph).hexchat_hook_print)(self.ph, name.as_ptr(), pri as libc::c_int, callback, bp as *mut _);
+            assert!(!res.is_null());
+            PrintHookHandle { ph: self.ph, hh: res, _f: PhantomData }
+        }
+    }
+    /// Sets a timer hook
+    pub fn hook_timer<F>(&mut self, timeout: i32, cb: F) -> TimerHookHandle where F: Fn(&mut PluginHandle) -> bool + 'static + ::std::panic::RefUnwindSafe {
+        unsafe extern "C" fn callback(ud: *mut libc::c_void) -> libc::c_int {
+            // hook may unhook itself.
+            // however, we don't wanna free it until it has returned.
+            let f: Rc<TimerHookUd> = rc_clone_from_raw(ud as *const TimerHookUd);
+            let alive = f.1.clone(); // clone the alive because why not
+            let f = f.0.clone();
+            let ph = f.1;
+            // we could technically free the Rc<TimerHookUd> here, I guess
+            match catch_unwind(move || {
+                (f.0)(&mut PluginHandle::new(f.1, f.2))
+            }) {
+                Result::Ok(true) => 1,
+                Result::Ok(false) => {
+                    // avoid double-free
+                    if !alive.get() {
+                        return 0;
+                    }
+                    // mark it no longer alive
+                    alive.set(false);
+                    // HexChat will automatically free the hook.
+                    // we just need to free the userdata.
+                    mem::drop(Rc::from_raw(ud as *const TimerHookUd));
+                    0
+                },
+                Result::Err(e @ _) => {
+                    // if it's a &str or String, just print it
+                    if let Some(estr) = e.downcast_ref::<&str>() {
+                        hexchat_print_str(ph, estr, false);
+                    } else if let Some(estring) = e.downcast_ref::<String>() {
+                        hexchat_print_str(ph, &estring, false);
+                    }
+                    // avoid double-free
+                    if !alive.get() {
+                        return 0;
+                    }
+                    // mark it no longer alive
+                    alive.set(false);
+                    // HexChat will automatically free the hook.
+                    // we just need to free the userdata.
+                    mem::drop(Rc::from_raw(ud as *const TimerHookUd));
+                    0
+                }
+            }
+        }
+        let alive = Rc::new(Cell::new(true));
+        let b: Rc<TimerHookUd> = Rc::new((Rc::new((Box::new(cb), self.ph, self.info)), alive.clone()));
+        let bp = Rc::into_raw(b);
+        unsafe {
+            let res = ((*self.ph).hexchat_hook_timer)(self.ph, timeout as libc::c_int, callback, bp as *mut _);
+            assert!(!res.is_null());
+            TimerHookHandle { ph: self.ph, hh: res, alive, _f: PhantomData }
         }
     }
 
@@ -418,6 +646,15 @@ impl<'a> EnsureValidContext<'a> {
         unimplemented!()
     }
 
+    /// Executes a command.
+    pub fn command(self, cmd: &str) {
+        // this was a mistake but oh well
+        let ph = self.ph.ph;
+        unsafe {
+            ((*ph).hexchat_command)(ph, CString::new(cmd).unwrap().as_ptr())
+        }
+    }
+
     pub fn emit_print(self) {
         // TODO
         unimplemented!()
@@ -444,10 +681,26 @@ impl<'a> EnsureValidContext<'a> {
     }
 
     /// Prints to the hexchat buffer.
-    // TODO check if this triggers event hooks (which could call /close and invalidate the
-    // context).
+    // as of hexchat 2.14.1, this does not call hooks.
     pub fn print(&mut self, s: &str) {
         self.ph.print(s)
+    }
+
+    /// Sets a command hook
+    pub fn hook_command<F>(&mut self, cmd: &str, cb: F, pri: i32, help: Option<&str>) -> CommandHookHandle where F: Fn(&mut PluginHandle, Word, WordEol) -> Eat + 'static + ::std::panic::RefUnwindSafe {
+        self.ph.hook_command(cmd, cb, pri, help)
+    }
+    /// Sets a server hook
+    pub fn hook_server<F>(&mut self, cmd: &str, cb: F, pri: i32) -> ServerHookHandle where F: Fn(&mut PluginHandle, Word, WordEol) -> Eat + 'static + ::std::panic::RefUnwindSafe {
+        self.ph.hook_server(cmd, cb, pri)
+    }
+    /// Sets a print hook
+    pub fn hook_print<F>(&mut self, name: &str, cb: F, pri: i32) -> PrintHookHandle where F: Fn(&mut PluginHandle, Word) -> Eat + 'static + ::std::panic::RefUnwindSafe {
+        self.ph.hook_print(name, cb, pri)
+    }
+    /// Sets a timer hook
+    pub fn hook_timer<F>(&mut self, timeout: i32, cb: F) -> TimerHookHandle where F: Fn(&mut PluginHandle) -> bool + 'static + ::std::panic::RefUnwindSafe {
+        self.ph.hook_timer(timeout, cb)
     }
 }
 
@@ -463,6 +716,12 @@ impl<'a> EnsureValidContext<'a> {
 // poisoning could also be used. std doesn't have anything for single-threaded performance (yet),
 // but hexchat isn't particularly performance-critical.
 type CommandHookUd = (Box<Fn(&mut PluginHandle, Word, WordEol) -> Eat + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo);
+/// Userdata type used by a server hook.
+type ServerHookUd = (Box<Fn(&mut PluginHandle, Word, WordEol) -> Eat + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo);
+/// Userdata type used by a print hook.
+type PrintHookUd = (Box<Fn(&mut PluginHandle, Word) -> Eat + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo);
+/// Userdata type used by a timer hook.
+type TimerHookUd = (Rc<(Box<Fn(&mut PluginHandle) -> bool + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo)>, Rc<Cell<bool>>);
 
 /// The contents of an empty CStr.
 ///
@@ -478,6 +737,20 @@ const EMPTY_CSTRING_DATA: &[u8] = b"\0";
 // TODO const fn, once that's possible
 fn cstr(b: &'static [u8]) -> *const libc::c_char {
     CStr::from_bytes_with_nul(b).unwrap().as_ptr()
+}
+
+/// Clones an Rc straight from a raw pointer.
+///
+/// # Safety
+///
+/// This function is unsafe because `ptr` must hame come from `Rc::into_raw`.
+unsafe fn rc_clone_from_raw<T>(ptr: *const T) -> Rc<T> {
+    // this is a bit confusing to read, but basically, we get an Rc from the raw ptr, and increment
+    // the refcount.
+    // The construct mem::forget(rc.clone()) increments the refcount.
+    let rc = Rc::from_raw(ptr);
+    mem::forget(rc.clone());
+    rc
 }
 
 /// Prints an &str to hexchat, trying to avoid allocations.
