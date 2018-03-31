@@ -635,10 +635,12 @@ impl<'a> EnsureValidContext<'a> {
     pub fn find_context(&mut self, servname: Option<&str>, channel: Option<&str>) -> Option<Context> {
         // this was a mistake but oh well
         let ph = self.ph.ph;
-        let servname = CString::new(servname).unwrap();
-        let channel = CString::new(channel).unwrap();
+        let servname = servname.map(|x| CString::new(x).unwrap());
+        let channel = channel.map(|x| CString::new(x).unwrap());
         let ctx = unsafe {
-            ((*ph).hexchat_find_context)(ph, servname.as_ptr(), channel.as_ptr())
+            let sptr = servname.map(|x| x.as_ptr()).unwrap_or(ptr::null());
+            let cptr = channel.map(|x| x.as_ptr()).unwrap_or(ptr::null());
+            ((*ph).hexchat_find_context)(ph, sptr, cptr)
         };
         if ctx.is_null() {
             None
