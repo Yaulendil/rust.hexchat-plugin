@@ -83,7 +83,7 @@
  *     -[x] ~~hexchat_free~~ not available - use Drop impls.
  *     -[ ] hexchat_event_attrs_create
  *     -[x] ~~hexchat_event_attrs_free~~ not available - use Drop impls.
- *     -[ ] hexchat_get_info
+ *     -[x] hexchat_get_info
  *     -[ ] hexchat_get_prefs
  *     -[ ] hexchat_list_get, hexchat_list_fields, hexchat_list_next, hexchat_list_str,
  *         hexchat_list_int, hexchat_list_time, hexchat_list_free
@@ -129,6 +129,7 @@ use std::marker::PhantomData;
 use std::ops;
 use std::rc::Rc;
 use std::cell::Cell;
+use std::borrow::Cow;
 
 // ****** //
 // PUBLIC //
@@ -226,6 +227,77 @@ pub struct Context {
 
 // #[derive(Debug)] // doesn't work
 pub struct InvalidContextError<F: FnOnce(EnsureValidContext) -> R, R>(F);
+
+/// A hexchat_get_info key.
+#[derive(Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Copy, Clone)]
+pub enum InfoId<'a> {
+    /// Returns the away message, or `None` if the user is not away.
+    Away,
+    /// Returns the current channel name.
+    Channel,
+    /// Returns the current charset.
+    Charset,
+    /// Returns the hexchat configuration directory, e.g. `/home/user/.config/hexchat`.
+    Configdir,
+    /// Returns the text event format string for the given text event name.
+    EventText(&'a str),
+    /// Returns the (real) hostname of the current server.
+    Host,
+    /// Returns the contents of the input box.
+    Inputbox,
+    /// Returns the library directory, e.g. `/usr/lib/hexchat`.
+    ///
+    /// May not always work, as this string isn't necessarily UTF-8, but local file system
+    /// encoding.
+    Libdirfs,
+    /// Returns the channel modes, if known, or `None`.
+    Modes,
+    /// Returns the current network name, or `None`.
+    Network,
+    /// Returns the user's current nick.
+    Nick,
+    /// Returns the user's nickserv password, if any, or `None`
+    Nickserv,
+    /// Returns the current server name, or `None` if you are not connected.
+    Server,
+    /// Returns the current channel topic.
+    Topic,
+    /// Returns the HexChat version string.
+    Version,
+    /// Returns the window status: "active", "hidden" or "normal".
+    WinStatus,
+}
+
+// ***** //
+// impls //
+// ***** //
+
+impl<'a> InfoId<'a> {
+    pub fn name(&self) -> Cow<'static, str> {
+        match *self {
+            InfoId::EventText(s) => {
+                let mut eventtext: String = "event_text ".into();
+                eventtext.push_str(&s);
+                eventtext.into()
+            },
+            InfoId::Away      => "away".into(),
+            InfoId::Channel   => "channel".into(),
+            InfoId::Charset   => "charset".into(),
+            InfoId::Configdir => "configdir".into(),
+            InfoId::Host      => "host".into(),
+            InfoId::Inputbox  => "inputbox".into(),
+            InfoId::Libdirfs  => "libdirfs".into(),
+            InfoId::Modes     => "modes".into(),
+            InfoId::Network   => "network".into(),
+            InfoId::Nick      => "nick".into(),
+            InfoId::Nickserv  => "nickserv".into(),
+            InfoId::Server    => "server".into(),
+            InfoId::Topic     => "topic".into(),
+            InfoId::Version   => "version".into(),
+            InfoId::WinStatus => "win_status".into(),
+        }
+    }
+}
 
 impl<F: FnOnce(EnsureValidContext) -> R, R> InvalidContextError<F, R> {
     pub fn get_closure(self) -> F {
@@ -581,6 +653,27 @@ impl PluginHandle {
         }
     }
 
+    /// Returns information on the current context.
+    ///
+    /// Note: `InfoId::Libdirfs` may return `None` or broken results if the result wouldn't be (valid) UTF-8.
+    pub fn get_info(&mut self, id: &InfoId) -> Option<String> {
+        let ph = self.ph;
+        let id_cstring = CString::new(&*id.name()).unwrap();
+        unsafe {
+            let res = ((*ph).hexchat_get_info)(ph, id_cstring.as_ptr());
+            if res.is_null() {
+                None
+            } else {
+                let s = CStr::from_ptr(res).to_owned().into_string();
+                if *id != InfoId::Libdirfs {
+                    Some(s.expect("non-utf8 word - broken hexchat"))
+                } else {
+                    s.ok()
+                }
+            }
+        }
+    }
+
     // ******* //
     // PRIVATE //
     // ******* //
@@ -669,9 +762,19 @@ impl<'a> EnsureValidContext<'a> {
         }
     }
 
-    pub fn send_modes(&mut self) {
-        // TODO
-        unimplemented!()
+    pub fn send_modes<'b, I: IntoIterator<Item=&'b str>>(&mut self, iter: I, mpl: i32, sign: char, mode: char) {
+        // this was a mistake but oh well
+        let ph = self.ph.ph;
+        assert!(sign == '+' || sign == '-', "sign must be + or -");
+        assert!(mode.is_ascii(), "mode must be ascii");
+        assert!(mpl >= 0, "mpl must be non-negative");
+        let v: Vec<CString> = iter.into_iter().map(|s| CString::new(s).unwrap()).collect();
+        let mut v2: Vec<*const libc::c_char> = (&v).iter().map(|x| x.as_ptr()).collect();
+        let arr: &mut [*const libc::c_char] = &mut *v2;
+        unsafe {
+            ((*ph).hexchat_send_modes)(ph, arr.as_mut_ptr(), arr.len() as libc::c_int,
+                mpl as libc::c_int, sign as libc::c_char, mode as libc::c_char)
+        }
     }
 
     /// Executes a command.
@@ -731,6 +834,9 @@ impl<'a> EnsureValidContext<'a> {
     /// Sets a timer hook
     pub fn hook_timer<F>(&mut self, timeout: i32, cb: F) -> TimerHookHandle where F: Fn(&mut PluginHandle) -> bool + 'static + ::std::panic::RefUnwindSafe {
         self.ph.hook_timer(timeout, cb)
+    }
+    pub fn get_info(&mut self, id: &InfoId) -> Option<String> {
+        self.ph.get_info(id)
     }
 }
 
