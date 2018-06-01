@@ -434,9 +434,10 @@ impl PluginHandle {
         unsafe {
             let info = self.info;
             if !(*info.name).is_null() || !(*info.desc).is_null() || !(*info.vers).is_null() {
+                std::str::from_utf8_unchecked(CStr::from_ptr(*info.name).to_bytes())
+            } else {
                 panic!("Attempt to get the name of a plugin that was not yet registered.");
             }
-            std::str::from_utf8_unchecked(CStr::from_ptr(*info.name).to_bytes())
         }
     }
 
@@ -449,9 +450,10 @@ impl PluginHandle {
         unsafe {
             let info = self.info;
             if !(*info.name).is_null() || !(*info.desc).is_null() || !(*info.vers).is_null() {
+                std::str::from_utf8_unchecked(CStr::from_ptr(*info.desc).to_bytes())
+            } else {
                 panic!("Attempt to get the description of a plugin that was not yet registered.");
             }
-            std::str::from_utf8_unchecked(CStr::from_ptr(*info.desc).to_bytes())
         }
     }
 
@@ -464,9 +466,10 @@ impl PluginHandle {
         unsafe {
             let info = self.info;
             if !(*info.name).is_null() || !(*info.desc).is_null() || !(*info.vers).is_null() {
+                std::str::from_utf8_unchecked(CStr::from_ptr(*info.vers).to_bytes())
+            } else {
                 panic!("Attempt to get the version of a plugin that was not yet registered.");
             }
-            std::str::from_utf8_unchecked(CStr::from_ptr(*info.vers).to_bytes())
         }
     }
 
