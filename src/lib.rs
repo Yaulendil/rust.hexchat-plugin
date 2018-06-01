@@ -404,7 +404,11 @@ impl PluginHandle {
         }
     }
 
-    /// Registers a hexchat plugin.
+    /// Registers this hexchat plugin.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if this plugin is already registered.
     pub fn register(&mut self, name: &str, desc: &str, ver: &str) {
         unsafe {
             let info = self.info;
@@ -418,6 +422,51 @@ impl PluginHandle {
             (*info.name) = name.into_raw();
             (*info.desc) = desc.into_raw();
             (*info.vers) = ver.into_raw();
+        }
+    }
+
+    /// Returns this plugin's registered name.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if this plugin is not registered.
+    pub fn get_name(&self) -> &str {
+        unsafe {
+            let info = self.info;
+            if !(*info.name).is_null() || !(*info.desc).is_null() || !(*info.vers).is_null() {
+                panic!("Attempt to get the name of a plugin that was not yet registered.");
+            }
+            std::str::from_utf8_unchecked(CStr::from_ptr(*info.name).to_bytes())
+        }
+    }
+
+    /// Returns this plugin's registered description.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if this plugin is not registered.
+    pub fn get_description(&self) -> &str {
+        unsafe {
+            let info = self.info;
+            if !(*info.name).is_null() || !(*info.desc).is_null() || !(*info.vers).is_null() {
+                panic!("Attempt to get the description of a plugin that was not yet registered.");
+            }
+            std::str::from_utf8_unchecked(CStr::from_ptr(*info.desc).to_bytes())
+        }
+    }
+
+    /// Returns this plugin's registered version.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if this plugin is not registered.
+    pub fn get_version(&self) -> &str {
+        unsafe {
+            let info = self.info;
+            if !(*info.name).is_null() || !(*info.desc).is_null() || !(*info.vers).is_null() {
+                panic!("Attempt to get the version of a plugin that was not yet registered.");
+            }
+            std::str::from_utf8_unchecked(CStr::from_ptr(*info.vers).to_bytes())
         }
     }
 
@@ -656,6 +705,7 @@ impl PluginHandle {
     /// Returns information on the current context.
     ///
     /// Note: `InfoId::Libdirfs` may return `None` or broken results if the result wouldn't be (valid) UTF-8.
+    // TODO this should be `id: InfoId`. fix in 0.3
     pub fn get_info(&mut self, id: &InfoId) -> Option<String> {
         let ph = self.ph;
         let id_cstring = CString::new(&*id.name()).unwrap();
@@ -801,6 +851,8 @@ impl<'a> EnsureValidContext<'a> {
     // ******** //
     // FORWARDS //
     // ******** //
+    // We can't just deref because then you could recursively ensure valid context and then it'd no
+    // longer work.
 
     pub fn get_context(&mut self) -> Context {
         self.ph.get_context()
