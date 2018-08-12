@@ -48,7 +48,7 @@ pub enum PluginGuiHandle {
 
 #[repr(C)]
 pub struct HexchatEventAttrs {
-    server_time_utc: libc::time_t,
+    pub server_time_utc: libc::time_t,
 }
 
 pub type HexchatPlugin = Ph;
@@ -181,17 +181,17 @@ pub struct Ph {
             name: *const libc::c_char,
             pri: libc::c_int,
             /* CALLBACK */
-            callback: Option<unsafe extern "C" fn(word: *const *const libc::c_char, word_eol: *const *const libc::c_char, attrs: *const HexchatEventAttrs, user_data: *mut libc::c_void) -> libc::c_int>,
+            callback: unsafe extern "C" fn(word: *const *const libc::c_char, word_eol: *const *const libc::c_char, attrs: *const HexchatEventAttrs, user_data: *mut libc::c_void) -> libc::c_int,
             userdata: *mut libc::c_void) -> *const HexchatHook,
     pub hexchat_hook_print_attrs: unsafe extern "C" fn(ph: *mut HexchatPlugin,
             name: *const libc::c_char,
             pri: libc::c_int,
             /* CALLBACK */
-            callback: Option<unsafe extern "C" fn(word: *const *const libc::c_char, attrs: *const HexchatEventAttrs, user_data: *mut libc::c_void) -> libc::c_int>,
+            callback: unsafe extern "C" fn(word: *const *const libc::c_char, attrs: *const HexchatEventAttrs, user_data: *mut libc::c_void) -> libc::c_int,
             userdata: *mut libc::c_void) -> *const HexchatHook,
     pub hexchat_emit_print_attrs: unsafe extern "C" fn(ph: *mut HexchatPlugin, attrs: *const HexchatEventAttrs,
             event_name: *const libc::c_char, ...) -> libc::c_int,
     pub hexchat_event_attrs_create: unsafe extern "C" fn(ph: *mut HexchatPlugin) -> *mut HexchatEventAttrs,
     pub hexchat_event_attrs_free: unsafe extern "C" fn(ph: *mut HexchatPlugin,
-            attrs: *const HexchatEventAttrs),
+            attrs: *mut HexchatEventAttrs),
 }

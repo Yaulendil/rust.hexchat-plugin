@@ -70,7 +70,7 @@
  * -[ ] Finish API support. [PRI-HIGH]
  *     -[x] word
  *     -[x] word_eol
- *     -[ ] HEXCHAT_PRI_{HIGHEST, HIGH, NORM, LOW, LOWEST}
+ *     -[#] HEXCHAT_PRI_{HIGHEST, HIGH, NORM, LOW, LOWEST}
  *     -[x] HEXCHAT_EAT_{NONE, HEXCHAT, PLUGIN, ALL}
  *     -[ ] HEXCHAT_FD_{READ, WRITE, EXCEPTION, NOTSOCKET}
  *     -[x] hexchat_command (for commandf, use command(&format!("...")), it is equivalent.)
@@ -81,7 +81,7 @@
  *     -[ ] hexchat_nickcmp
  *     -[ ] hexchat_strip
  *     -[x] ~~hexchat_free~~ not available - use Drop impls.
- *     -[ ] hexchat_event_attrs_create
+ *     -[x] ~~hexchat_event_attrs_create~~ not available - converted as needed
  *     -[x] ~~hexchat_event_attrs_free~~ not available - use Drop impls.
  *     -[x] hexchat_get_info
  *     -[ ] hexchat_get_prefs
@@ -89,10 +89,10 @@
  *         hexchat_list_int, hexchat_list_time, hexchat_list_free
  *     -[x] hexchat_hook_command
  *     -[ ] hexchat_hook_fd
- *     -[x] hexchat_hook_print
- *     -[ ] hexchat_hook_print_attrs
- *     -[x] hexchat_hook_server
- *     -[ ] hexchat_hook_server_attrs
+ *     -[#] hexchat_hook_print (implemented through _attrs)
+ *     -[x] hexchat_hook_print_attrs
+ *     -[#] hexchat_hook_server (implemented through _attrs)
+ *     -[x] hexchat_hook_server_attrs
  *     -[x] hexchat_hook_timer
  *     -[x] ~~hexchat_unhook~~ not available - use Drop impls
  *     -[x] hexchat_find_context
@@ -119,23 +119,50 @@ pub extern crate libc;
 
 mod internals;
 
-use std::panic::catch_unwind;
-use std::thread;
-use std::ffi::{CString, CStr};
-use std::str::FromStr;
-use std::mem;
-use std::ptr;
-use std::marker::PhantomData;
-use std::ops;
-use std::rc::Rc;
-use std::cell::Cell;
 use std::borrow::Cow;
+use std::cell::Cell;
+use std::ffi::{CString, CStr};
+use std::marker::PhantomData;
+use std::mem;
+use std::ops;
+use std::panic::catch_unwind;
+use std::ptr;
+use std::rc::Rc;
+use std::str::FromStr;
+use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
 
 // ****** //
 // PUBLIC //
 // ****** //
 
-/// A hexchat plugin
+// Consts
+
+// EAT_*
+/// Equivalent to HEXCHAT_EAT_NONE.
+pub const EAT_NONE: Eat = Eat { do_eat: 0 };
+/// Equivalent to HEXCHAT_EAT_HEXCHAT.
+pub const EAT_HEXCHAT: Eat = Eat { do_eat: 1 };
+/// Equivalent to HEXCHAT_EAT_PLUGIN.
+pub const EAT_PLUGIN: Eat = Eat { do_eat: 2 };
+/// Equivalent to HEXCHAT_EAT_ALL.
+pub const EAT_ALL: Eat = Eat { do_eat: 1 | 2 };
+
+// PRI_*
+/// Equivalent to HEXCHAT_PRI_HIGHEST
+pub const PRI_HIGHEST: i32 = 127;
+/// Equivalent to HEXCHAT_PRI_HIGH
+pub const PRI_HIGH: i32 = 64;
+/// Equivalent to HEXCHAT_PRI_NORM
+pub const PRI_NORM: i32 = 0;
+/// Equivalent to HEXCHAT_PRI_LOW
+pub const PRI_LOW: i32 = -64;
+/// Equivalent to HEXCHAT_PRI_LOWEST
+pub const PRI_LOWEST: i32 = -128;
+
+// Traits
+
+/// A hexchat plugin.
 pub trait Plugin {
     /// Called to initialize the plugin.
     fn init(&self, ph: &mut PluginHandle, arg: Option<&str>) -> bool;
@@ -147,24 +174,36 @@ pub trait Plugin {
     }
 }
 
-/// A hexchat plugin handle
+// Structs
+
+/// A hexchat plugin handle.
 pub struct PluginHandle {
     ph: *mut internals::Ph,
     // Used for registration
     info: PluginInfo,
 }
 
+/// Arguments passed to a hook, until the next argument.
 pub struct Word<'a> {
     word: Vec<&'a str>
 }
 
+/// Arguments passed to a hook, until the end of the line.
 pub struct WordEol<'a> {
     word_eol: Vec<&'a str>
 }
 
-/// A safety wrapper that ensures you're working with a valid context.
+/// A safety wrapper to ensure you're working with a valid context.
 pub struct EnsureValidContext<'a> {
     ph: &'a mut PluginHandle,
+}
+
+/// Event attributes.
+#[derive(Clone)]
+pub struct EventAttrs<'a> {
+    /// Server time.
+    pub server_time: Option<SystemTime>,
+    _dummy: PhantomData<&'a ()>,
 }
 
 /// An status indicator for event callbacks. Indicates whether to continue processing, eat hexchat,
@@ -173,15 +212,6 @@ pub struct EnsureValidContext<'a> {
 pub struct Eat {
     do_eat: i32,
 }
-
-/// Equivalent to HEXCHAT_EAT_NONE.
-pub const EAT_NONE: Eat = Eat { do_eat: 0 };
-/// Equivalent to HEXCHAT_EAT_HEXCHAT.
-pub const EAT_HEXCHAT: Eat = Eat { do_eat: 1 };
-/// Equivalent to HEXCHAT_EAT_PLUGIN.
-pub const EAT_PLUGIN: Eat = Eat { do_eat: 2 };
-/// Equivalent to HEXCHAT_EAT_ALL.
-pub const EAT_ALL: Eat = Eat { do_eat: 1 | 2 };
 
 /// A command hook handle.
 pub struct CommandHookHandle {
@@ -227,6 +257,8 @@ pub struct Context {
 
 // #[derive(Debug)] // doesn't work
 pub struct InvalidContextError<F: FnOnce(EnsureValidContext) -> R, R>(F);
+
+// Enums
 
 /// A hexchat_get_info key.
 #[derive(Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Copy, Clone)]
@@ -576,9 +608,13 @@ impl PluginHandle {
             CommandHookHandle { ph: self.ph, hh: res, _f: PhantomData }
         }
     }
-    /// Sets a server hook
+    /// Sets a server hook.
     pub fn hook_server<F>(&mut self, cmd: &str, cb: F, pri: i32) -> ServerHookHandle where F: Fn(&mut PluginHandle, Word, WordEol) -> Eat + 'static + ::std::panic::RefUnwindSafe {
-        unsafe extern "C" fn callback(word: *const *const libc::c_char, word_eol: *const *const libc::c_char, ud: *mut libc::c_void) -> libc::c_int {
+        self.hook_server_attrs(cmd, move |ph, w, we, _| cb(ph, w, we), pri)
+    }
+    /// Sets a server hook, with attributes.
+    pub fn hook_server_attrs<F>(&mut self, cmd: &str, cb: F, pri: i32) -> ServerHookHandle where F: Fn(&mut PluginHandle, Word, WordEol, EventAttrs) -> Eat + 'static + ::std::panic::RefUnwindSafe {
+        unsafe extern "C" fn callback(word: *const *const libc::c_char, word_eol: *const *const libc::c_char, attrs: *const internals::HexchatEventAttrs, ud: *mut libc::c_void) -> libc::c_int {
             // hook may unhook itself.
             // however, we don't wanna free it until it has returned.
             let f: Rc<ServerHookUd> = rc_clone_from_raw(ud as *const ServerHookUd);
@@ -586,7 +622,7 @@ impl PluginHandle {
             match catch_unwind(move || {
                 let word = Word::new(word);
                 let word_eol = WordEol::new(word_eol);
-                (f.0)(&mut PluginHandle::new(f.1, f.2), word, word_eol).do_eat as libc::c_int
+                (f.0)(&mut PluginHandle::new(f.1, f.2), word, word_eol, (&*attrs).into()).do_eat as libc::c_int
             }) {
                 Result::Ok(v @ _) => v,
                 Result::Err(e @ _) => {
@@ -604,21 +640,25 @@ impl PluginHandle {
         let name = CString::new(cmd).unwrap();
         let bp = Rc::into_raw(b);
         unsafe {
-            let res = ((*self.ph).hexchat_hook_server)(self.ph, name.as_ptr(), pri as libc::c_int, callback, bp as *mut _);
+            let res = ((*self.ph).hexchat_hook_server_attrs)(self.ph, name.as_ptr(), pri as libc::c_int, callback, bp as *mut _);
             assert!(!res.is_null());
             ServerHookHandle { ph: self.ph, hh: res, _f: PhantomData }
         }
     }
-    /// Sets a print hook
+    /// Sets a print hook.
     pub fn hook_print<F>(&mut self, name: &str, cb: F, pri: i32) -> PrintHookHandle where F: Fn(&mut PluginHandle, Word) -> Eat + 'static + ::std::panic::RefUnwindSafe {
-        unsafe extern "C" fn callback(word: *const *const libc::c_char, ud: *mut libc::c_void) -> libc::c_int {
+        self.hook_print_attrs(name, move |ph, w, _| cb(ph, w), pri)
+    }
+    /// Sets a print hook, with attributes.
+    pub fn hook_print_attrs<F>(&mut self, name: &str, cb: F, pri: i32) -> PrintHookHandle where F: Fn(&mut PluginHandle, Word, EventAttrs) -> Eat + 'static + ::std::panic::RefUnwindSafe {
+        unsafe extern "C" fn callback(word: *const *const libc::c_char, attrs: *const internals::HexchatEventAttrs, ud: *mut libc::c_void) -> libc::c_int {
             // hook may unhook itself.
             // however, we don't wanna free it until it has returned.
             let f: Rc<PrintHookUd> = rc_clone_from_raw(ud as *const PrintHookUd);
             let ph = f.1;
             match catch_unwind(move || {
                 let word = Word::new(word);
-                (f.0)(&mut PluginHandle::new(f.1, f.2), word).do_eat as libc::c_int
+                (f.0)(&mut PluginHandle::new(f.1, f.2), word, (&*attrs).into()).do_eat as libc::c_int
             }) {
                 Result::Ok(v @ _) => v,
                 Result::Err(e @ _) => {
@@ -636,7 +676,7 @@ impl PluginHandle {
         let name = CString::new(name).unwrap();
         let bp = Rc::into_raw(b);
         unsafe {
-            let res = ((*self.ph).hexchat_hook_print)(self.ph, name.as_ptr(), pri as libc::c_int, callback, bp as *mut _);
+            let res = ((*self.ph).hexchat_hook_print_attrs)(self.ph, name.as_ptr(), pri as libc::c_int, callback, bp as *mut _);
             assert!(!res.is_null());
             PrintHookHandle { ph: self.ph, hh: res, _f: PhantomData }
         }
@@ -749,6 +789,24 @@ impl PluginHandle {
                 ((*ph).hexchat_list_free)(ph, list);
                 None
             }
+        }
+    }
+}
+
+impl<'a> EventAttrs<'a> {
+    fn new() -> EventAttrs<'a> {
+        EventAttrs {
+            server_time: None,
+            _dummy: PhantomData,
+        }
+    }
+}
+
+impl<'a> From<&'a internals::HexchatEventAttrs> for EventAttrs<'a> {
+    fn from(other: &'a internals::HexchatEventAttrs) -> EventAttrs<'a> {
+        EventAttrs {
+            server_time: if other.server_time_utc > 0 { Some(UNIX_EPOCH + Duration::from_secs(other.server_time_utc as u64)) } else { None },
+            _dummy: PhantomData,
         }
     }
 }
@@ -908,9 +966,9 @@ impl<'a> EnsureValidContext<'a> {
 // but hexchat isn't particularly performance-critical.
 type CommandHookUd = (Box<Fn(&mut PluginHandle, Word, WordEol) -> Eat + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo);
 /// Userdata type used by a server hook.
-type ServerHookUd = (Box<Fn(&mut PluginHandle, Word, WordEol) -> Eat + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo);
+type ServerHookUd = (Box<Fn(&mut PluginHandle, Word, WordEol, EventAttrs) -> Eat + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo);
 /// Userdata type used by a print hook.
-type PrintHookUd = (Box<Fn(&mut PluginHandle, Word) -> Eat + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo);
+type PrintHookUd = (Box<Fn(&mut PluginHandle, Word, EventAttrs) -> Eat + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo);
 /// Userdata type used by a timer hook.
 type TimerHookUd = (Rc<(Box<Fn(&mut PluginHandle) -> bool + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo)>, Rc<Cell<bool>>);
 
@@ -960,6 +1018,33 @@ unsafe fn hexchat_print_str(ph: *mut internals::Ph, s: &str, panic_on_nul: bool)
             ((*ph).hexchat_print)(ph, csr.as_ptr())
         },
         e @ _ => if panic_on_nul {e.unwrap();}, // TODO nul_position?
+    }
+}
+
+/// Helper to manage owned internals::HexchatEventAttrs
+struct HexchatEventAttrsHelper(*mut internals::HexchatEventAttrs, *mut internals::Ph);
+
+impl HexchatEventAttrsHelper {
+    fn new(ph: *mut internals::Ph) -> Self {
+        HexchatEventAttrsHelper(unsafe { ((*ph).hexchat_event_attrs_create)(ph) }, ph)
+    }
+
+    fn new_with(ph: *mut internals::Ph, attrs: EventAttrs) -> Self {
+        let helper = Self::new(ph);
+        let v = attrs.server_time.or(Some(UNIX_EPOCH)).map(|st| match st.duration_since(UNIX_EPOCH) {
+            Ok(n) => n.as_secs(),
+            Err(_) => 0
+        }).filter(|&st| st < (libc::time_t::max_value() as u64)).unwrap() as libc::time_t;
+        unsafe { (*helper.0).server_time_utc = v; }
+        helper
+    }
+}
+
+impl Drop for HexchatEventAttrsHelper {
+    fn drop(&mut self) {
+        unsafe {
+            ((*self.1).hexchat_event_attrs_free)(self.1, self.0)
+        }
     }
 }
 
