@@ -46,7 +46,7 @@
 //!         ph.hook_command("hello-world", |ph, arg, arg_eol| {
 //!             ph.print("Hello, World!");
 //!             hexchat_plugin::EAT_ALL
-//!         }, 0, Some("prints 'Hello, World!'"));
+//!         }, hexchat_plugin::PRI_NORM, Some("prints 'Hello, World!'"));
 //!         true
 //!     }
 //! }
@@ -692,7 +692,7 @@ impl PluginHandle {
     ///     ph.hook_command("hello-world", |ph, arg, arg_eol| {
     ///         ph.print("Hello, World!");
     ///         hexchat_plugin::EAT_ALL
-    ///     }, 0, Some("prints 'Hello, World!'"));
+    ///     }, hexchat_plugin::PRI_NORM, Some("prints 'Hello, World!'"));
     /// }
     /// ```
     pub fn hook_command<F>(&mut self, cmd: &str, cb: F, pri: i32, help: Option<&str>) -> CommandHookHandle where F: Fn(&mut PluginHandle, Word, WordEol) -> Eat + 'static + ::std::panic::RefUnwindSafe {
@@ -741,7 +741,7 @@ impl PluginHandle {
     ///             ph.print("We have message tags!?");
     ///         }
     ///         hexchat_plugin::EAT_NONE
-    ///     }, 0);
+    ///     }, hexchat_plugin::PRI_NORM);
     /// }
     /// ```
     pub fn hook_server<F>(&mut self, cmd: &str, cb: F, pri: i32) -> ServerHookHandle where F: Fn(&mut PluginHandle, Word, WordEol) -> Eat + 'static + ::std::panic::RefUnwindSafe {
@@ -795,7 +795,7 @@ impl PluginHandle {
     ///             }
     ///         }
     ///         hexchat_plugin::EAT_NONE
-    ///     }, 0);
+    ///     }, hexchat_plugin::PRI_NORM);
     /// }
     /// ```
     pub fn hook_print<F>(&mut self, name: &str, cb: F, pri: i32) -> PrintHookHandle where F: Fn(&mut PluginHandle, Word) -> Eat + 'static + ::std::panic::RefUnwindSafe {
