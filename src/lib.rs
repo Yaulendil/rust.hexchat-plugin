@@ -789,8 +789,8 @@ impl PluginHandle {
     ///
     /// fn register_print_hooks(ph: &mut PluginHandle) {
     ///     ph.hook_print("Channel Message", |ph, arg| {
-    ///         if let Some(nick) = word.get(0) {
-    ///             if nick == "KnOwN_SpAmMeR" {
+    ///         if let Some(nick) = arg.get(0) {
+    ///             if *nick == "KnOwN_SpAmMeR" {
     ///                 return hexchat_plugin::EAT_ALL
     ///             }
     ///         }
@@ -841,10 +841,10 @@ impl PluginHandle {
     /// use hexchat_plugin::PluginHandle;
     ///
     /// fn register_timers(ph: &mut PluginHandle) {
-    ///     ph.hook_timer(|ph| {
+    ///     ph.hook_timer(2000, |ph| {
     ///         ph.print("timer up!");
     ///         false
-    ///     }, 2000);
+    ///     });
     /// }
     /// ```
     pub fn hook_timer<F>(&mut self, timeout: i32, cb: F) -> TimerHookHandle where F: Fn(&mut PluginHandle) -> bool + 'static + ::std::panic::RefUnwindSafe {

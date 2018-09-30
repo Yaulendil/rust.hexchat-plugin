@@ -4,7 +4,7 @@ version = "0.2.6"
 authors = ["SoniEx2 <endermoneymod@gmail.com>"]
 description = "Lets you write HexChat plugins in Rust"
 license = "AGPL-3.0+"
-repository = "https://bitbucket.org/SoniEx2/hexchat-plugin.rs"
+repository = "https://cybre.tech/SoniEx2/rust.hexchat.hexchat-plugin/"
 
 [dependencies]
 libc = "0.2"
