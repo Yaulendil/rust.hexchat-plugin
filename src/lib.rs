@@ -15,7 +15,46 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
-//! <!-- TODO (placeholder) -->
+//! Write hexchat plugins in Rust!
+//!
+//! This library provides safe API bindings for hexchat, but doesn't attempt to fix hexchat's own
+//! bugs. It makes no effort to stop you from unloading your own code while it's still running, for
+//! example.
+//!
+//! When using this library, it's strongly recommended to avoid heap-allocated statics (static
+//! mutexes, lazy_static, etc). This is because it's currently impossible to deallocate those on
+//! plugin unload. This can be worked around by placing those statics as fields in your plugin
+//! struct.
+//!
+//! This caveat does not apply to static assets (`static FOO: &'static str`, for example), but it
+//! does apply to thread-local storage.
+//! 
+//! # Examples
+//!
+//! ```
+//! #[macro_use]
+//! extern crate hexchat_plugin;
+//!
+//! use hexchat_plugin::{Plugin, PluginHandle};
+//!
+//! #[derive(Default)]
+//! struct MyPlugin {}
+//!
+//! impl Plugin for MyPlugin {
+//!     fn init(&self, ph: &mut PluginHandle, arg: Option<&str>) -> bool {
+//!         ph.register("myplugin", "0.1.0", "my simple plugin");
+//!         ph.hook_command("hello-world", |ph, arg, arg_eol| {
+//!             ph.print("Hello, World!");
+//!             hexchat_plugin::EAT_ALL
+//!         }, 0, Some("prints 'Hello, World!'"));
+//!         true
+//!     }
+//! }
+//!
+//! hexchat_plugin!(MyPlugin);
+//!
+//! # fn main() { } // satisfy the compiler, we can't actually run the code
+//! ```
 
 /*
  * Some info about how HexChat does things:
@@ -176,7 +215,17 @@ pub trait Plugin {
 
 // Structs
 
-/// A hexchat plugin handle.
+/// A hexchat plugin handle, used to register hooks and interact with hexchat.
+///
+/// # Examples
+///
+/// ```
+/// use hexchat_plugin::{PluginHandle};
+///
+/// fn init(ph: &mut PluginHandle) {
+///     ph.register("myplug", "0.1.0", "my awesome plug");
+/// }
+/// ```
 pub struct PluginHandle {
     ph: *mut internals::Ph,
     // Used for registration
@@ -184,16 +233,62 @@ pub struct PluginHandle {
 }
 
 /// Arguments passed to a hook, until the next argument.
+///
+/// # Examples
+/// 
+/// ```
+/// use hexchat_plugin::{PluginHandle, Word, WordEol, Eat};
+///
+/// fn cmd_foo(ph: &mut PluginHandle, arg: Word, arg_eol: WordEol) -> Eat {
+///     if arg.len() < 3 {
+///         ph.print("Not enough arguments");
+///     } else {
+///         ph.print(&format!("{} {} {}", arg[0], arg[1], arg[2]));
+///     }
+///     hexchat_plugin::EAT_ALL
+/// }
+///
+/// fn on_privmsg(ph: &mut PluginHandle, word: Word, word_eol: WordEol) -> Eat {
+///     if word.len() > 0 && word[0].starts_with('@') {
+///         ph.print("We have message tags!?");
+///     }
+///     hexchat_plugin::EAT_NONE
+/// }
+/// ```
 pub struct Word<'a> {
     word: Vec<&'a str>
 }
 
 /// Arguments passed to a hook, until the end of the line.
+///
+/// # Examples
+/// 
+/// ```
+/// use hexchat_plugin::{PluginHandle, Word, WordEol, Eat};
+///
+/// fn cmd_foo(ph: &mut PluginHandle, arg: Word, arg_eol: WordEol) -> Eat {
+///     if arg.len() < 3 {
+///         ph.print("Not enough arguments");
+///     } else {
+///         ph.print(&format!("{} {} {}", arg[0], arg[1], arg_eol[2]));
+///     }
+///     hexchat_plugin::EAT_ALL
+/// }
+///
+/// fn on_privmsg(ph: &mut PluginHandle, word: Word, word_eol: WordEol) -> Eat {
+///     if word_eol.len() > 0 && word[0].starts_with('@') {
+///         ph.print("We have message tags!?");
+///     }
+///     hexchat_plugin::EAT_NONE
+/// }
+/// ```
 pub struct WordEol<'a> {
     word_eol: Vec<&'a str>
 }
 
 /// A safety wrapper to ensure you're working with a valid context.
+///
+/// This mechanism attempts to reduce the likelihood of segfaults.
 pub struct EnsureValidContext<'a> {
     ph: &'a mut PluginHandle,
 }
@@ -206,8 +301,10 @@ pub struct EventAttrs<'a> {
     _dummy: PhantomData<&'a ()>,
 }
 
-/// An status indicator for event callbacks. Indicates whether to continue processing, eat hexchat,
+/// A status indicator for event callbacks. Indicates whether to continue processing, eat hexchat,
 /// eat plugin, or eat all.
+///
+/// Returned by most hooks.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Eat {
     do_eat: i32,
@@ -436,11 +533,21 @@ impl PluginHandle {
         }
     }
 
-    /// Registers this hexchat plugin.
+    /// Registers this hexchat plugin. This must be called exactly once when the plugin is loaded.
     ///
     /// # Panics
     ///
     /// This function panics if this plugin is already registered.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hexchat_plugin::PluginHandle;
+    ///
+    /// fn init(ph: &mut PluginHandle) {
+    ///     ph.register("foo", "0.1.0", "my foo plugin");
+    /// }
+    /// ```
     pub fn register(&mut self, name: &str, desc: &str, ver: &str) {
         unsafe {
             let info = self.info;
@@ -574,7 +681,20 @@ impl PluginHandle {
         }
     }
 
-    /// Sets a command hook
+    /// Sets a command hook.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hexchat_plugin::PluginHandle;
+    ///
+    /// fn register_commands(ph: &mut PluginHandle) {
+    ///     ph.hook_command("hello-world", |ph, arg, arg_eol| {
+    ///         ph.print("Hello, World!");
+    ///         hexchat_plugin::EAT_ALL
+    ///     }, 0, Some("prints 'Hello, World!'"));
+    /// }
+    /// ```
     pub fn hook_command<F>(&mut self, cmd: &str, cb: F, pri: i32, help: Option<&str>) -> CommandHookHandle where F: Fn(&mut PluginHandle, Word, WordEol) -> Eat + 'static + ::std::panic::RefUnwindSafe {
         unsafe extern "C" fn callback(word: *const *const libc::c_char, word_eol: *const *const libc::c_char, ud: *mut libc::c_void) -> libc::c_int {
             // hook may unhook itself.
@@ -609,6 +729,21 @@ impl PluginHandle {
         }
     }
     /// Sets a server hook.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hexchat_plugin::PluginHandle;
+    ///
+    /// fn register_server_hooks(ph: &mut PluginHandle) {
+    ///     ph.hook_server("PRIVMSG", |ph, word, word_eol| {
+    ///         if word.len() > 0 && word[0].starts_with('@') {
+    ///             ph.print("We have message tags!?");
+    ///         }
+    ///         hexchat_plugin::EAT_NONE
+    ///     }, 0);
+    /// }
+    /// ```
     pub fn hook_server<F>(&mut self, cmd: &str, cb: F, pri: i32) -> ServerHookHandle where F: Fn(&mut PluginHandle, Word, WordEol) -> Eat + 'static + ::std::panic::RefUnwindSafe {
         self.hook_server_attrs(cmd, move |ph, w, we, _| cb(ph, w, we), pri)
     }
@@ -646,6 +781,23 @@ impl PluginHandle {
         }
     }
     /// Sets a print hook.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hexchat_plugin::PluginHandle;
+    ///
+    /// fn register_print_hooks(ph: &mut PluginHandle) {
+    ///     ph.hook_print("Channel Message", |ph, arg| {
+    ///         if let Some(nick) = word.get(0) {
+    ///             if nick == "KnOwN_SpAmMeR" {
+    ///                 return hexchat_plugin::EAT_ALL
+    ///             }
+    ///         }
+    ///         hexchat_plugin::EAT_NONE
+    ///     }, 0);
+    /// }
+    /// ```
     pub fn hook_print<F>(&mut self, name: &str, cb: F, pri: i32) -> PrintHookHandle where F: Fn(&mut PluginHandle, Word) -> Eat + 'static + ::std::panic::RefUnwindSafe {
         self.hook_print_attrs(name, move |ph, w, _| cb(ph, w), pri)
     }
@@ -682,6 +834,19 @@ impl PluginHandle {
         }
     }
     /// Sets a timer hook
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hexchat_plugin::PluginHandle;
+    ///
+    /// fn register_timers(ph: &mut PluginHandle) {
+    ///     ph.hook_timer(|ph| {
+    ///         ph.print("timer up!");
+    ///         false
+    ///     }, 2000);
+    /// }
+    /// ```
     pub fn hook_timer<F>(&mut self, timeout: i32, cb: F) -> TimerHookHandle where F: Fn(&mut PluginHandle) -> bool + 'static + ::std::panic::RefUnwindSafe {
         unsafe extern "C" fn callback(ud: *mut libc::c_void) -> libc::c_int {
             // hook may unhook itself.
