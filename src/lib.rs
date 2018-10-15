@@ -1410,7 +1410,8 @@ pub unsafe fn hexchat_plugin_init<T>(plugin_handle: *mut libc::c_void,
 }
 
 #[doc(hidden)]
-pub unsafe fn hexchat_plugin_deinit<T>(plugin_handle: *mut libc::c_void) where T: Plugin {
+pub unsafe fn hexchat_plugin_deinit<T>(plugin_handle: *mut libc::c_void) -> libc::c_int where T: Plugin {
+    let mut safe_to_unload = 1;
     // plugin_handle should never be null, but just in case.
     if !plugin_handle.is_null() {
         let ph = plugin_handle as *mut internals::Ph;
@@ -1420,11 +1421,11 @@ pub unsafe fn hexchat_plugin_deinit<T>(plugin_handle: *mut libc::c_void) where T
                 let mut info: Option<PluginInfo> = None;
                 {
                     let mut ausinfo = ::std::panic::AssertUnwindSafe(&mut info);
-                    catch_unwind(move || {
+                    safe_to_unload = if catch_unwind(move || {
                         let userdata = *pop_userdata(ph);
                         **ausinfo = Some(userdata.pluginfo);
                         userdata.plug.deinit(&mut PluginHandle { ph, info: userdata.pluginfo });
-                    }).ok();
+                    }).is_ok() { 1 } else { 0 };
                 }
                 if let Some(mut info) = info {
                     info.drop_info();
@@ -1438,6 +1439,7 @@ pub unsafe fn hexchat_plugin_deinit<T>(plugin_handle: *mut libc::c_void) where T
     } else {
         eprintln!("hexchat_plugin_deinit called with a null plugin_handle - broken hexchat");
     }
+    safe_to_unload
 }
 
 /// Exports a hexchat plugin.
@@ -1453,8 +1455,8 @@ macro_rules! hexchat_plugin {
             $crate::hexchat_plugin_init::<$t>(plugin_handle, plugin_name, plugin_desc, plugin_version, arg)
         }
         #[no_mangle]
-        pub unsafe extern "C" fn hexchat_plugin_deinit(plugin_handle: *mut $crate::libc::c_void) {
-            $crate::hexchat_plugin_deinit::<$t>(plugin_handle);
+        pub unsafe extern "C" fn hexchat_plugin_deinit(plugin_handle: *mut $crate::libc::c_void) -> $crate::libc::c_int {
+            $crate::hexchat_plugin_deinit::<$t>(plugin_handle)
         }
         // unlike what the documentation states, there's no need to define hexchat_plugin_get_info.
         // so we don't. it'd be impossible to make it work well with rust anyway.
