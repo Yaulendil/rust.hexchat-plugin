@@ -35,18 +35,21 @@
 //! #[macro_use]
 //! extern crate hexchat_plugin;
 //!
-//! use hexchat_plugin::{Plugin, PluginHandle};
+//! use std::sync::Mutex;
+//! use hexchat_plugin::{Plugin, PluginHandle, CommandHookHandle};
 //!
 //! #[derive(Default)]
-//! struct MyPlugin {}
+//! struct MyPlugin {
+//!     cmd: Mutex<Option<CommandHookHandle>>
+//! }
 //!
 //! impl Plugin for MyPlugin {
 //!     fn init(&self, ph: &mut PluginHandle, arg: Option<&str>) -> bool {
 //!         ph.register("myplugin", "0.1.0", "my simple plugin");
-//!         ph.hook_command("hello-world", |ph, arg, arg_eol| {
+//!         *self.cmd.lock().unwrap() = Some(ph.hook_command("hello-world", |ph, arg, arg_eol| {
 //!             ph.print("Hello, World!");
 //!             hexchat_plugin::EAT_ALL
-//!         }, hexchat_plugin::PRI_NORM, Some("prints 'Hello, World!'"));
+//!         }, hexchat_plugin::PRI_NORM, Some("prints 'Hello, World!'")));
 //!         true
 //!     }
 //! }
@@ -686,13 +689,15 @@ impl PluginHandle {
     /// # Examples
     ///
     /// ```
-    /// use hexchat_plugin::PluginHandle;
+    /// use hexchat_plugin::{PluginHandle, CommandHookHandle};
     ///
-    /// fn register_commands(ph: &mut PluginHandle) {
+    /// fn register_commands(ph: &mut PluginHandle) -> Vec<CommandHookHandle> {
+    ///     vec![
     ///     ph.hook_command("hello-world", |ph, arg, arg_eol| {
     ///         ph.print("Hello, World!");
     ///         hexchat_plugin::EAT_ALL
-    ///     }, hexchat_plugin::PRI_NORM, Some("prints 'Hello, World!'"));
+    ///     }, hexchat_plugin::PRI_NORM, Some("prints 'Hello, World!'")),
+    ///     ]
     /// }
     /// ```
     pub fn hook_command<F>(&mut self, cmd: &str, cb: F, pri: i32, help: Option<&str>) -> CommandHookHandle where F: Fn(&mut PluginHandle, Word, WordEol) -> Eat + 'static + ::std::panic::RefUnwindSafe {
@@ -733,15 +738,17 @@ impl PluginHandle {
     /// # Examples
     ///
     /// ```
-    /// use hexchat_plugin::PluginHandle;
+    /// use hexchat_plugin::{PluginHandle, ServerHookHandle};
     ///
-    /// fn register_server_hooks(ph: &mut PluginHandle) {
+    /// fn register_server_hooks(ph: &mut PluginHandle) -> Vec<ServerHookHandle> {
+    ///     vec![
     ///     ph.hook_server("PRIVMSG", |ph, word, word_eol| {
     ///         if word.len() > 0 && word[0].starts_with('@') {
     ///             ph.print("We have message tags!?");
     ///         }
     ///         hexchat_plugin::EAT_NONE
-    ///     }, hexchat_plugin::PRI_NORM);
+    ///     }, hexchat_plugin::PRI_NORM),
+    ///     ]
     /// }
     /// ```
     pub fn hook_server<F>(&mut self, cmd: &str, cb: F, pri: i32) -> ServerHookHandle where F: Fn(&mut PluginHandle, Word, WordEol) -> Eat + 'static + ::std::panic::RefUnwindSafe {
@@ -785,9 +792,10 @@ impl PluginHandle {
     /// # Examples
     ///
     /// ```
-    /// use hexchat_plugin::PluginHandle;
+    /// use hexchat_plugin::{PluginHandle, PrintHookHandle};
     ///
-    /// fn register_print_hooks(ph: &mut PluginHandle) {
+    /// fn register_print_hooks(ph: &mut PluginHandle) -> Vec<PrintHookHandle> {
+    ///     vec![
     ///     ph.hook_print("Channel Message", |ph, arg| {
     ///         if let Some(nick) = arg.get(0) {
     ///             if *nick == "KnOwN_SpAmMeR" {
@@ -795,7 +803,8 @@ impl PluginHandle {
     ///             }
     ///         }
     ///         hexchat_plugin::EAT_NONE
-    ///     }, hexchat_plugin::PRI_NORM);
+    ///     }, hexchat_plugin::PRI_NORM),
+    ///     ]
     /// }
     /// ```
     pub fn hook_print<F>(&mut self, name: &str, cb: F, pri: i32) -> PrintHookHandle where F: Fn(&mut PluginHandle, Word) -> Eat + 'static + ::std::panic::RefUnwindSafe {
@@ -838,13 +847,15 @@ impl PluginHandle {
     /// # Examples
     ///
     /// ```
-    /// use hexchat_plugin::PluginHandle;
+    /// use hexchat_plugin::{PluginHandle, TimerHookHandle};
     ///
-    /// fn register_timers(ph: &mut PluginHandle) {
+    /// fn register_timers(ph: &mut PluginHandle) -> Vec<TimerHookHandle> {
+    ///     vec![
     ///     ph.hook_timer(2000, |ph| {
     ///         ph.print("timer up!");
     ///         false
-    ///     });
+    ///     }),
+    ///     ]
     /// }
     /// ```
     pub fn hook_timer<F>(&mut self, timeout: i32, cb: F) -> TimerHookHandle where F: Fn(&mut PluginHandle) -> bool + 'static + ::std::panic::RefUnwindSafe {
