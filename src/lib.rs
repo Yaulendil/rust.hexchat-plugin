@@ -314,6 +314,7 @@ pub struct Eat {
 }
 
 /// A command hook handle.
+#[must_use = "Hooks must be stored somewhere and are automatically unhooked on Drop"]
 pub struct CommandHookHandle {
     ph: *mut internals::Ph,
     hh: *const internals::HexchatHook,
@@ -322,6 +323,7 @@ pub struct CommandHookHandle {
 }
 
 /// A server hook handle.
+#[must_use = "Hooks must be stored somewhere and are automatically unhooked on Drop"]
 pub struct ServerHookHandle {
     ph: *mut internals::Ph,
     hh: *const internals::HexchatHook,
@@ -330,6 +332,7 @@ pub struct ServerHookHandle {
 }
 
 /// A print hook handle.
+#[must_use = "Hooks must be stored somewhere and are automatically unhooked on Drop"]
 pub struct PrintHookHandle {
     ph: *mut internals::Ph,
     hh: *const internals::HexchatHook,
@@ -338,6 +341,7 @@ pub struct PrintHookHandle {
 }
 
 /// A timer hook handle.
+#[must_use = "Hooks must be stored somewhere and are automatically unhooked on Drop"]
 pub struct TimerHookHandle {
     ph: *mut internals::Ph,
     hh: *const internals::HexchatHook,
