@@ -131,7 +131,7 @@
  *         hexchat_list_int, hexchat_list_time, hexchat_list_free
  *     -[x] hexchat_hook_command
  *     -[ ] hexchat_hook_fd
- *     -[#] hexchat_hook_print (implemented through _attrs)
+ *     -[x] hexchat_hook_print
  *     -[x] hexchat_hook_print_attrs
  *     -[#] hexchat_hook_server (implemented through _attrs)
  *     -[x] hexchat_hook_server_attrs
@@ -170,6 +170,7 @@ use std::ops;
 use std::panic::catch_unwind;
 use std::ptr;
 use std::rc::Rc;
+use std::rc::Weak as RcWeak;
 use std::str::FromStr;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
@@ -231,6 +232,7 @@ pub trait Plugin {
 /// ```
 pub struct PluginHandle {
     ph: *mut internals::Ph,
+    skip_pri_ck: bool,
     // Used for registration
     info: PluginInfo,
 }
@@ -352,11 +354,10 @@ pub struct TimerHookHandle {
 }
 
 /// A context.
-// We don't want this Copy + Clone, as we may want to implement a context invalidation system
-// at some point (rather than relying on the hexchat allocator not to allocate a new context where
-// a context was free'd).
+#[derive(Clone)]
 pub struct Context {
-    ctx: *const internals::HexchatContext,
+    ctx: RcWeak<*const internals::HexchatContext>, // may be null
+    closure: Rc<Cell<Option<PrintHookHandle>>>,
 }
 
 // #[derive(Debug)] // doesn't work
@@ -536,7 +537,7 @@ impl<'a> ops::Deref for WordEol<'a> {
 impl PluginHandle {
     fn new(ph: *mut internals::Ph, info: PluginInfo) -> PluginHandle {
         PluginHandle {
-            ph, info
+            ph, info, skip_pri_ck: false,
         }
     }
 
@@ -651,18 +652,35 @@ impl PluginHandle {
     /// Note: The returned context may be invalid. Use [`set_context`] to check.
     ///
     /// [`set_context`]: #method.set_context
+    // This needs to be fixed by hexchat. I cannot make the value become null when it's invalid
+    // without invoking UB. This is because I can't set_context to null.
     pub fn get_context(&mut self) -> Context {
-        unsafe {
-            Context { ctx: ((*self.ph).hexchat_get_context)(self.ph) }
-        }
+        let ctxp = unsafe { ((*self.ph).hexchat_get_context)(self.ph) };
+        unsafe { wrap_context(self, ctxp) }
+        // let ctxp = std::panic::AssertUnwindSafe(Rc::new(unsafe { ((*self.ph).hexchat_get_context)(self.ph) }));
+        // let weak_ctxp = Rc::downgrade(&ctxp); // calling the Closure should drop the Context (sort of)
+        // let closure: Rc<Cell<Option<PrintHookHandle>>> = Rc::new(Cell::new(None));
+        // let hook = std::panic::AssertUnwindSafe(Rc::downgrade(&closure)); // dropping the Context should drop the Closure
+        // self.skip_pri_ck = true;
+        // closure.set(Some(self.hook_print("Close Context", move |ph, _| {
+        //     let _ = &ctxp;
+        //     let _: Option<PrintHookHandle> = hook.upgrade().unwrap().replace(None);
+        //     EAT_NONE
+        // }, libc::c_int::min_value())));
+        // self.skip_pri_ck = false;
+        // Context { ctx: weak_ctxp, closure }
     }
 
     /// Sets the current context.
     ///
     /// Returns `true` if the context is valid, `false` otherwise.
     pub fn set_context(&mut self, ctx: &Context) -> bool {
-        unsafe {
-            ((*self.ph).hexchat_set_context)(self.ph, ctx.ctx) != 0
+        if let Some(ctx) = ctx.ctx.upgrade() {
+            unsafe {
+                ((*self.ph).hexchat_set_context)(self.ph, *ctx) != 0
+            }
+        } else {
+            false
         }
     }
 
@@ -811,8 +829,43 @@ impl PluginHandle {
     ///     ]
     /// }
     /// ```
-    pub fn hook_print<F>(&mut self, name: &str, cb: F, pri: i32) -> PrintHookHandle where F: Fn(&mut PluginHandle, Word) -> Eat + 'static + ::std::panic::RefUnwindSafe {
-        self.hook_print_attrs(name, move |ph, w, _| cb(ph, w), pri)
+    pub fn hook_print<F>(&mut self, name: &str, cb: F, mut pri: i32) -> PrintHookHandle where F: Fn(&mut PluginHandle, Word) -> Eat + 'static + ::std::panic::RefUnwindSafe {
+        // hmm, is there any way to avoid this code duplication?
+        // hook_print is special because dummy prints (keypresses, Close Context) are handled
+        // through here, but never through hook_print_attrs. :/
+        unsafe extern "C" fn callback(word: *const *const libc::c_char, ud: *mut libc::c_void) -> libc::c_int {
+            // hook may unhook itself.
+            // however, we don't wanna free it until it has returned.
+            let f: Rc<PrintHookUd> = rc_clone_from_raw(ud as *const PrintHookUd);
+            let ph = f.1;
+            match catch_unwind(move || {
+                let word = Word::new(word);
+                (f.0)(&mut PluginHandle::new(f.1, f.2), word, EventAttrs::new()).do_eat as libc::c_int
+            }) {
+                Result::Ok(v @ _) => v,
+                Result::Err(e @ _) => {
+                    // if it's a &str or String, just print it
+                    if let Some(estr) = e.downcast_ref::<&str>() {
+                        hexchat_print_str(ph, estr, false);
+                    } else if let Some(estring) = e.downcast_ref::<String>() {
+                        hexchat_print_str(ph, &estring, false);
+                    }
+                    0 // EAT_NONE
+                }
+            }
+        }
+        if name == "Close Context" && (pri as libc::c_int == libc::c_int::min_value()) && !self.skip_pri_ck {
+            self.print("Warning: Attempted to hook Close Context with priority INT_MIN. Adjusting to INT_MIN+1.");
+            pri = (libc::c_int::min_value() + 1) as i32;
+        }
+        let b: Rc<PrintHookUd> = Rc::new((Box::new(move |ph, w, _| cb(ph, w)), self.ph, self.info));
+        let name = CString::new(name).unwrap();
+        let bp = Rc::into_raw(b);
+        unsafe {
+            let res = ((*self.ph).hexchat_hook_print)(self.ph, name.as_ptr(), pri as libc::c_int, callback, bp as *mut _);
+            assert!(!res.is_null());
+            PrintHookHandle { ph: self.ph, hh: res, _f: PhantomData }
+        }
     }
     /// Sets a print hook, with attributes.
     pub fn hook_print_attrs<F>(&mut self, name: &str, cb: F, pri: i32) -> PrintHookHandle where F: Fn(&mut PluginHandle, Word, EventAttrs) -> Eat + 'static + ::std::panic::RefUnwindSafe {
@@ -958,13 +1011,13 @@ impl PluginHandle {
             #[allow(unused_mut)]
             let mut list = ((*ph).hexchat_list_get)(ph, cstr(b"channels\0"));
             // hexchat does this thing where it puts a context in a list_str.
-            // this is the proper way to do this
+            // this *is* the proper way to do this
             if ((*ph).hexchat_list_next)(ph, list) != 0 {
                 // if this panics we may leak some memory. it's not a big deal tho, as it indicates
                 // a bug in hexchat-plugin.rs.
                 let ctx = ((*ph).hexchat_list_str)(ph, list, cstr(b"context\0")) as *const internals::HexchatContext;
                 ((*ph).hexchat_list_free)(ph, list);
-                Some(Context { ctx })
+                Some(wrap_context(self, ctx))
             } else {
                 ((*ph).hexchat_list_free)(ph, list);
                 None
@@ -1029,7 +1082,7 @@ impl<'a> EnsureValidContext<'a> {
         if ctx.is_null() {
             None
         } else {
-            Some(Context { ctx })
+            Some(unsafe { wrap_context(self.ph, ctx) })
         }
     }
 
@@ -1180,6 +1233,26 @@ unsafe fn rc_clone_from_raw<T>(ptr: *const T) -> Rc<T> {
     let rc = Rc::from_raw(ptr);
     mem::forget(rc.clone());
     rc
+}
+
+/// Converts a **valid** context pointer into a Context (Rust-managed) struct.
+///
+/// # Safety
+///
+/// This function doesn't validate the context.
+unsafe fn wrap_context(ph: &mut PluginHandle, ctx: *const internals::HexchatContext) -> Context {
+    let ctxp = std::panic::AssertUnwindSafe(Rc::new(ctx));
+    let weak_ctxp = Rc::downgrade(&ctxp); // calling the Closure should drop the Context (sort of)
+    let closure: Rc<Cell<Option<PrintHookHandle>>> = Rc::new(Cell::new(None));
+    let hook = std::panic::AssertUnwindSafe(Rc::downgrade(&closure)); // dropping the Context should drop the Closure
+    ph.skip_pri_ck = true;
+    closure.set(Some(ph.hook_print("Close Context", move |ph, _| {
+        let _ = &ctxp;
+        let _: Option<PrintHookHandle> = hook.upgrade().unwrap().replace(None);
+        EAT_NONE
+    }, libc::c_int::min_value())));
+    ph.skip_pri_ck = false;
+    Context { ctx: weak_ctxp, closure }
 }
 
 /// Prints an &str to hexchat, trying to avoid allocations.
@@ -1384,10 +1457,7 @@ pub unsafe fn hexchat_plugin_init<T>(plugin_handle: *mut libc::c_void,
     };
     let r: thread::Result<Option<Box<_>>> = {
         catch_unwind(move || {
-            let mut pluginhandle = PluginHandle {
-                ph: ph,
-                info: pluginfo,
-            };
+            let mut pluginhandle = PluginHandle::new(ph, pluginfo);
             let plug = T::default();
             if plug.init(&mut pluginhandle, if !arg.is_null() { Some(CStr::from_ptr(arg).to_str().expect("arg not valid utf-8 - broken hexchat")) } else { None }) {
                 if !(pluginfo.name.is_null() || pluginfo.desc.is_null() || pluginfo.vers.is_null()) {
@@ -1415,6 +1485,8 @@ pub unsafe fn hexchat_plugin_init<T>(plugin_handle: *mut libc::c_void,
         r @ _ => {
             // if the initialization fails, deinit doesn't get called, so we need to clean up
             // ourselves.
+
+            // TODO might leak pluginfo on panic?
             
             if let Err(_) = r {
                 // TODO try to log panic?
@@ -1439,7 +1511,7 @@ pub unsafe fn hexchat_plugin_deinit<T>(plugin_handle: *mut libc::c_void) -> libc
                     safe_to_unload = if catch_unwind(move || {
                         let userdata = *pop_userdata(ph);
                         **ausinfo = Some(userdata.pluginfo);
-                        userdata.plug.deinit(&mut PluginHandle { ph, info: userdata.pluginfo });
+                        userdata.plug.deinit(&mut PluginHandle::new(ph, userdata.pluginfo));
                     }).is_ok() { 1 } else { 0 };
                 }
                 if let Some(mut info) = info {
