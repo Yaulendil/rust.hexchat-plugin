@@ -117,10 +117,10 @@
  *     -[ ] HEXCHAT_FD_{READ, WRITE, EXCEPTION, NOTSOCKET}
  *     -[x] hexchat_command (for commandf, use command(&format!("...")), it is equivalent.)
  *     -[x] hexchat_print (for printf, use print(&format!("...")), it is equivalent.)
- *     -[ ] hexchat_emit_print
- *     -[ ] hexchat_emit_print_attrs
- *     -[ ] hexchat_send_modes
- *     -[ ] hexchat_nickcmp
+ *     -[x] hexchat_emit_print
+ *     -[x] hexchat_emit_print_attrs
+ *     -[x] hexchat_send_modes
+ *     -[x] hexchat_nickcmp
  *     -[ ] hexchat_strip
  *     -[x] ~~hexchat_free~~ not available - use Drop impls.
  *     -[x] ~~hexchat_event_attrs_create~~ not available - converted as needed
@@ -628,13 +628,6 @@ impl PluginHandle {
     // NOTE: using a closure is nicer.
     // TODO check if this is actually safe
     pub fn ensure_valid_context<F, R>(&mut self, f: F) -> R where F: FnOnce(EnsureValidContext) -> R {
-        // let ctx = self.get_context();
-        // if !self.set_context(ctx) {
-        //     // invalid context
-        //     // TODO fix up the context
-        //     unimplemented!()
-        // }
-        // f(EnsureValidContext { ph: self })
         let ctx = self.get_context();
         // need this here because we don't have NLL yet
         let res = self.with_context(&ctx, f);
@@ -652,23 +645,12 @@ impl PluginHandle {
     /// Note: The returned context may be invalid. Use [`set_context`] to check.
     ///
     /// [`set_context`]: #method.set_context
-    // This needs to be fixed by hexchat. I cannot make the value become null when it's invalid
-    // without invoking UB. This is because I can't set_context to null.
     pub fn get_context(&mut self) -> Context {
         let ctxp = unsafe { ((*self.ph).hexchat_get_context)(self.ph) };
-        unsafe { wrap_context(self, ctxp) }
-        // let ctxp = std::panic::AssertUnwindSafe(Rc::new(unsafe { ((*self.ph).hexchat_get_context)(self.ph) }));
-        // let weak_ctxp = Rc::downgrade(&ctxp); // calling the Closure should drop the Context (sort of)
-        // let closure: Rc<Cell<Option<PrintHookHandle>>> = Rc::new(Cell::new(None));
-        // let hook = std::panic::AssertUnwindSafe(Rc::downgrade(&closure)); // dropping the Context should drop the Closure
-        // self.skip_pri_ck = true;
-        // closure.set(Some(self.hook_print("Close Context", move |ph, _| {
-        //     let _ = &ctxp;
-        //     let _: Option<PrintHookHandle> = hook.upgrade().unwrap().replace(None);
-        //     EAT_NONE
-        // }, libc::c_int::min_value())));
-        // self.skip_pri_ck = false;
-        // Context { ctx: weak_ctxp, closure }
+        // This needs to be fixed by hexchat. I cannot make the value become null when it's invalid
+        // without invoking UB. This is because I can't set_context to null.
+        let ok = unsafe { ((*self.ph).hexchat_set_context)(self.ph, ctxp) };
+        unsafe { wrap_context(self, if ok == 0 { ptr::null() } else { ctxp }) }
     }
 
     /// Sets the current context.
@@ -1027,7 +1009,7 @@ impl PluginHandle {
 }
 
 impl<'a> EventAttrs<'a> {
-    fn new() -> EventAttrs<'a> {
+    pub fn new() -> EventAttrs<'a> {
         EventAttrs {
             server_time: None,
             _dummy: PhantomData,
@@ -1132,14 +1114,57 @@ impl<'a> EnsureValidContext<'a> {
         }
     }
 
-    pub fn emit_print(self) {
-        // TODO
-        unimplemented!()
+    pub fn emit_print<'b, I: IntoIterator<Item=&'b str>>(self, event: &str, args: I) -> bool {
+        let ph = self.ph.ph;
+        let event = CString::new(event).unwrap();
+        let mut args_cs: [Option<CString>; 4] = [None, None, None, None];
+        {
+            let mut iter = args.into_iter();
+            for i in 0..4 {
+                args_cs[i] = iter.next().map(|x| CString::new(x).unwrap());
+                if args_cs[i].is_none() {
+                    break;
+                }
+            }
+            if iter.next().is_some() {
+                // it's better to panic so as to get bug reports when we need to increase this
+                panic!("too many arguments to emit_print (max 4), or iterator not fused");
+            }
+        }
+        let mut argv: [*const libc::c_char; 5] = [ptr::null(); 5];
+        for i in 0..4 {
+            argv[i] = args_cs[i].as_ref().map_or(ptr::null(), |s| s.as_ptr());
+        }
+        unsafe {
+            ((*ph).hexchat_emit_print)(ph, event.as_ptr(), argv[0], argv[1], argv[2], argv[3], argv[4]) != 0
+        }
     }
 
-    pub fn emit_print_attrs(self) {
-        // TODO
-        unimplemented!()
+    pub fn emit_print_attrs<'b, I: IntoIterator<Item=&'b str>>(self, attrs: EventAttrs, event: &str, args: I) -> bool {
+        let ph = self.ph.ph;
+        let event = CString::new(event).unwrap();
+        let mut args_cs: [Option<CString>; 4] = [None, None, None, None];
+        {
+            let mut iter = args.into_iter();
+            for i in 0..4 {
+                args_cs[i] = iter.next().map(|x| CString::new(x).unwrap());
+                if args_cs[i].is_none() {
+                    break;
+                }
+            }
+            if let Some(_) = iter.next() {
+                // it's better to panic so as to get bug reports when we need to increase this
+                panic!("too many arguments to emit_print_attrs (max 4), or iterator not fused");
+            }
+        }
+        let mut argv: [*const libc::c_char; 5] = [ptr::null(); 5];
+        for i in 0..4 {
+            argv[i] = args_cs[i].as_ref().map_or(ptr::null(), |s| s.as_ptr());
+        }
+        let helper = HexchatEventAttrsHelper::new_with(ph, attrs);
+        unsafe {
+            ((*ph).hexchat_emit_print_attrs)(ph, helper.0, event.as_ptr(), argv[0], argv[1], argv[2], argv[3], argv[4]) != 0
+        }
     }
 
     // ******** //
