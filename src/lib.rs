@@ -1272,8 +1272,12 @@ unsafe fn wrap_context(ph: &mut PluginHandle, ctx: *const internals::HexchatCont
     let hook = std::panic::AssertUnwindSafe(Rc::downgrade(&closure)); // dropping the Context should drop the Closure
     ph.skip_pri_ck = true;
     closure.set(Some(ph.hook_print("Close Context", move |ph, _| {
-        let _ = &ctxp;
-        let _: Option<PrintHookHandle> = hook.upgrade().unwrap().replace(None);
+        // need to be careful not to recurse or leak memory
+        let ph = ph.ph;
+        let ctx = ((*ph).hexchat_get_context)(ph);
+        if **ctxp == ctx {
+            let _: Option<PrintHookHandle> = hook.upgrade().unwrap().replace(None);
+        }
         EAT_NONE
     }, libc::c_int::min_value())));
     ph.skip_pri_ck = false;
