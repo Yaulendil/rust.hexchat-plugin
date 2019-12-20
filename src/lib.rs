@@ -303,6 +303,7 @@ pub struct EnsureValidContext<'a> {
 pub struct EventAttrs<'a> {
     /// Server time.
     pub server_time: Option<SystemTime>,
+    pub tags: &'a str,
     _dummy: PhantomData<&'a ()>,
 }
 
@@ -1012,6 +1013,7 @@ impl<'a> EventAttrs<'a> {
     pub fn new() -> EventAttrs<'a> {
         EventAttrs {
             server_time: None,
+            tags: "",
             _dummy: PhantomData,
         }
     }
@@ -1019,8 +1021,15 @@ impl<'a> EventAttrs<'a> {
 
 impl<'a> From<&'a internals::HexchatEventAttrs> for EventAttrs<'a> {
     fn from(other: &'a internals::HexchatEventAttrs) -> EventAttrs<'a> {
+        /*
+         * FIXME: At some point around here, there is a Panic because
+         * `other.ircv3_line` ends partway through '\u{0}'.
+         */
+        let cs: &CStr = unsafe { CStr::from_ptr(other.ircv3_line) };
+
         EventAttrs {
             server_time: if other.server_time_utc > 0 { Some(UNIX_EPOCH + Duration::from_secs(other.server_time_utc as u64)) } else { None },
+            tags: cs.to_str().unwrap(),
             _dummy: PhantomData,
         }
     }
@@ -1034,7 +1043,7 @@ impl<'a> EnsureValidContext<'a> {
  * `hexchat_get_prefs` uses the plugin context if name == "state_cursor" or "id" (or anything with
  * the same hash).
  * `hexchat_list_get` uses the plugin context if name == "notify" (or anything with the same hash).
- * `hexchat_list_str`, `hexchat_list_int`, 
+ * `hexchat_list_str`, `hexchat_list_int`,
  * `hexchat_emit_print`, `hexchat_emit_print_attrs` use the plugin context.
  * `hexchat_send_modes` uses the plugin context.
  * We need to wrap them (or, alternatively, hexchat_command). However, there's no (safe) way to get
@@ -1222,13 +1231,13 @@ impl<'a> EnsureValidContext<'a> {
 // mutable state, std provides std::sync::Mutex which has poisoning. Other interior mutability with
 // poisoning could also be used. std doesn't have anything for single-threaded performance (yet),
 // but hexchat isn't particularly performance-critical.
-type CommandHookUd = (Box<Fn(&mut PluginHandle, Word, WordEol) -> Eat + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo);
+type CommandHookUd = (Box<dyn Fn(&mut PluginHandle, Word, WordEol) -> Eat + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo);
 /// Userdata type used by a server hook.
-type ServerHookUd = (Box<Fn(&mut PluginHandle, Word, WordEol, EventAttrs) -> Eat + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo);
+type ServerHookUd = (Box<dyn Fn(&mut PluginHandle, Word, WordEol, EventAttrs) -> Eat + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo);
 /// Userdata type used by a print hook.
-type PrintHookUd = (Box<Fn(&mut PluginHandle, Word, EventAttrs) -> Eat + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo);
+type PrintHookUd = (Box<dyn Fn(&mut PluginHandle, Word, EventAttrs) -> Eat + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo);
 /// Userdata type used by a timer hook.
-type TimerHookUd = (Rc<(Box<Fn(&mut PluginHandle) -> bool + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo)>, Rc<Cell<bool>>);
+type TimerHookUd = (Rc<(Box<dyn Fn(&mut PluginHandle) -> bool + ::std::panic::RefUnwindSafe>, *mut internals::Ph, PluginInfo)>, Rc<Cell<bool>>);
 
 /// The contents of an empty CStr.
 ///
@@ -1393,7 +1402,7 @@ impl PluginInfo {
 
 /// Plugin data stored in the hexchat plugin_handle.
 struct PhUserdata {
-    plug: Box<Plugin>,
+    plug: Box<dyn Plugin>,
     pluginfo: PluginInfo,
 }
 
@@ -1444,17 +1453,17 @@ pub unsafe fn hexchat_plugin_init<T>(plugin_handle: *mut libc::c_void,
     // function as if it were a Box!
     (*ph).userdata = ptr::null_mut();
     // read the filename so we can pass it on later.
-    let filename = if !(*plugin_name).is_null() {
-        if let Ok(fname) = CStr::from_ptr(*plugin_name).to_owned().into_string() {
-            fname
-        } else {
-            eprintln!("failed to convert filename to utf8 - broken hexchat");
-            return 0;
-        }
-    } else {
-        // no filename specified for some reason, but we can still load
-        String::new() // empty string
-    };
+//    let filename = if !(*plugin_name).is_null() {
+//        if let Ok(fname) = CStr::from_ptr(*plugin_name).to_owned().into_string() {
+//            fname
+//        } else {
+//            eprintln!("failed to convert filename to utf8 - broken hexchat");
+//            return 0;
+//        }
+//    } else {
+//        // no filename specified for some reason, but we can still load
+//        String::new() // empty string
+//    };
     // these may be null, unless initialization is successful.
     // we set them to null as markers.
     *plugin_name = ptr::null();
@@ -1516,7 +1525,7 @@ pub unsafe fn hexchat_plugin_init<T>(plugin_handle: *mut libc::c_void,
             // ourselves.
 
             // TODO might leak pluginfo on panic?
-            
+
             if let Err(_) = r {
                 // TODO try to log panic?
             }

@@ -49,6 +49,7 @@ pub enum PluginGuiHandle {
 #[repr(C)]
 pub struct HexchatEventAttrs {
     pub server_time_utc: libc::time_t,
+    pub ircv3_line: *const i8,
 }
 
 pub type HexchatPlugin = Ph;
