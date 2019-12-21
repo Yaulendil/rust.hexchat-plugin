@@ -1021,10 +1021,6 @@ impl<'a> EventAttrs<'a> {
 
 impl<'a> From<&'a internals::HexchatEventAttrs> for EventAttrs<'a> {
     fn from(other: &'a internals::HexchatEventAttrs) -> EventAttrs<'a> {
-        /*
-         * FIXME: At some point around here, there is a Panic because
-         * `other.ircv3_line` ends partway through '\u{0}'.
-         */
         let cs: &CStr = unsafe { CStr::from_ptr(other.ircv3_line) };
 
         EventAttrs {
