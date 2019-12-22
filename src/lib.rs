@@ -303,7 +303,7 @@ pub struct EnsureValidContext<'a> {
 pub struct EventAttrs<'a> {
     /// Server time.
     pub server_time: Option<SystemTime>,
-    pub tags: String,
+    pub tags: &'a str,
     _dummy: PhantomData<&'a ()>,
 }
 
@@ -1013,7 +1013,7 @@ impl<'a> EventAttrs<'a> {
     pub fn new() -> EventAttrs<'a> {
         EventAttrs {
             server_time: None,
-            tags: "".to_string(),
+            tags: "",
             _dummy: PhantomData,
         }
     }
@@ -1025,7 +1025,7 @@ impl<'a> From<&'a internals::HexchatEventAttrs> for EventAttrs<'a> {
 
         EventAttrs {
             server_time: if other.server_time_utc > 0 { Some(UNIX_EPOCH + Duration::from_secs(other.server_time_utc as u64)) } else { None },
-            tags: cs.to_str().unwrap_or("").to_string(),
+            tags: cs.to_str().unwrap_or(""),
             _dummy: PhantomData,
         }
     }
